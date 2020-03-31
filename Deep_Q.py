@@ -41,23 +41,13 @@ Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'done'))
 
 
-class ReplayMemory(object):
 
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.memory = deque(maxlen=capacity)
 
-    def push(self, *args):
-        """Saves a transition."""
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
 
 class DeepQNet(nn.Module):
     def __init__(self, h, w):
         super(DeepQNet, self).__init__()
-        self.conv1 = nn.Conv2d(1, 16, kernel_size= 8, stride=4)
+        self.conv1 = nn.Conv2d(4, 16, kernel_size= 8, stride=4)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
 
         def conv2d_size_out(size, kernel_size, stride):
@@ -80,6 +70,41 @@ class DeepQNet(nn.Module):
         x = self.out(x)
         return x
 
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.memory = deque(maxlen=capacity)
+
+    def push(self, *args):
+        """Saves a transition."""
+        self.memory.append(Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+
+class Atari(object):
+    def __init__(self, envName, agent_history_length=4):
+        self.env = gym.make(envName)
+        self.state = None
+        self.agent_history_length = agent_history_length
+
+    def reset(self):
+        frame = self.env.reset()
+        
+        processed_frame = convert_screen(frame)
+        self.state = np.repeat(processed_frame, self.agent_history_length, axis=0)
+        
+        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device)
+    
+    def step(self, action):
+        new_frame, reward, terminal, info = self.env.step(action) 
+        processed_new_frame = convert_screen(new_frame)
+        new_state = np.append(self.state[1:, :, :], processed_new_frame, axis=0)
+        
+        self.state = new_state
+        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), reward, terminal, info
 
 
 def convert_screen(screen):
@@ -98,31 +123,36 @@ def convert_screen(screen):
     return gray.reshape(1, HEIGHT, WIDTH)
 
 
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 GAMMA = 0.999
 EPS_START = 0.9
-EPS_END = 0.05
-EPS_DECAY = 200
-TARGET_UPDATE = 10
+EPS_END = 0.1
+DECAY_RATE = 0.00003
+TARGET_UPDATE = 10000
 
 HEIGHT = 84
 WIDTH = 84
-
+EPSILON = 0
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
 
-optimizer = torch.optim.RMSprop(policy_net.parameters())
-memory = ReplayMemory(10000)
+optimizer = torch.optim.RMSprop(policy_net.parameters(), lr=0.00001)
+memory = ReplayMemory(100000)
 steps_done = 0
 
 def select_action(state):
     global steps_done
+    global EPSILON
+
     # This equation is for the decaying epsilon
     eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-        math.exp(-1. * steps_done / EPS_DECAY)
+        math.exp(-steps_done * DECAY_RATE)
     steps_done += 1
+
     r = np.random.rand()
+
+    EPSILON = eps_threshold
 
     # We select an action with an espilon greedy policy 
     if r > eps_threshold:
@@ -135,7 +165,7 @@ def select_action(state):
 
 def optimize_model():
     if len(memory.memory) < BATCH_SIZE:
-        return
+        return 0
     transitions = memory.sample(BATCH_SIZE)
     # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
     # detailed explanation). This converts batch-array of Transitions
@@ -178,43 +208,59 @@ def optimize_model():
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
+    
+    return loss.item()
 
 PATH = "./deepQ.pt"
 
-def train_model(num_episodes):
+def train_model(num_frames):
+    env = Atari('BeamRiderDeterministic-v4')
     cumulative_frames = 0
-    for episode in range(num_episodes):
-        print(episode)
+    while cumulative_frames < num_frames:
+        print("=============================================")
         state = env.reset()
-        state = convert_screen(state)
-        state = state.reshape(-1, 1, 84, 84)
-        state = torch.tensor(state, device=device)
         done = False
-
+        game_score = 0
+        current_frames = cumulative_frames
         cum_reward = 0
+        cum_loss = 0
         while not done:
             action = select_action(state)
 
             next_state, reward, done, _ = env.step(actions[action.item()])
-            next_state = torch.tensor(convert_screen(next_state).reshape(-1, 1, 84, 84), device=device)
-            reward = torch.tensor([reward], device=device)
+            game_score += reward
+            if done:
+                reward = -44.0
+            if reward < 0:
+                reward = -1.0
+            if reward > 0:
+                reward = 1.0
 
+
+            reward = torch.tensor([reward], device=device)
+            
             if done:
                 next_state = None
+
             
             memory.push(state, action, next_state, reward, done)
 
 
             state = next_state
-            optimize_model()
+            loss = optimize_model()
             cum_reward += reward
             cumulative_frames += 1
+            cum_loss += loss
+        print("Current Frame: {}".format(cumulative_frames))
+        print("Avg Episode Loss:{}".format(cum_loss/(cumulative_frames-current_frames)))
         print("Final reward: {}".format(cum_reward.item()))
+        print("Epsilon after: {}".format(EPSILON))
         print("Cumulative Frames: {}".format(cumulative_frames))
-        if episode % TARGET_UPDATE == 0:
+        print("Final Game Score: {}".format(game_score))
+        if cumulative_frames % TARGET_UPDATE == 0:
             target_net.load_state_dict(policy_net.state_dict())
 
-        torch.save(target_net.state_dict(), PATH)
+    torch.save(target_net.state_dict(), PATH)
 
 def load_agent():
     model = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -239,11 +285,16 @@ def inference(episodes, model):
                     action = np.random.choice(actions)
                 observation, _, done, _ = env.step(action)
 
-
+import time
 def main():
-    # train_model(300)
-    model = load_agent()
-    inference(100, model)
+    train_model(10000000)
+    # model = load_agent()
+    # inference(100, model)
+
+
+
+        
+
 
 
 
