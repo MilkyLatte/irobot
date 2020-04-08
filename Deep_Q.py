@@ -10,8 +10,8 @@ from collections import deque, namedtuple
 import random
 
 
-
-env = gym.make('BeamRider-v0')
+env = gym.make('BreakoutDeterministic-v4')
+# env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ACTION_MEANING = {
@@ -35,8 +35,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #     17: "DOWNLEFTFIRE",
 # }
 
-actions = [0, 1, 3, 4]
-n_actions = 4
+n_actions = env.action_space.n
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'done'))
 
@@ -60,7 +59,7 @@ class DeepQNet(nn.Module):
 
         linear_input = convh * convw * 64
         self.fc1 = nn.Linear(linear_input, 512)
-        self.out = nn.Linear(512, 4)
+        self.out = nn.Linear(512, n_actions)
 
 
     
@@ -68,6 +67,7 @@ class DeepQNet(nn.Module):
         x = F.relu(self.conv1(x.float()))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
+
         
         x = F.relu(self.fc1(x.view(x.size(0), -1)))
         x = self.out(x)
@@ -190,6 +190,7 @@ class Atari(object):
         return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), processed_frame
     
     def step(self, action):
+        self.env.render()
         new_frame, reward, terminal, info = self.env.step(action) 
         if info['ale.lives'] < self.last_lives:
             terminal_life_lost = True
@@ -234,8 +235,8 @@ EPSILON = 0
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
 
-optimizer = torch.optim.RMSprop(policy_net.parameters(), lr=0.00001)
-memory = ReplayMemory(1000000)
+optimizer = torch.optim.RMSprop(policy_net.parameters(), lr=0.0001)
+memory = ReplayMemory(10000)
 steps_done = 0
 
 def get_epsilon(rate, current_step):
@@ -257,7 +258,7 @@ def select_action(state):
     EPSILON = eps_threshold
 
     # We select an action with an espilon greedy policy 
-    if r > eps_threshold:
+    if r > 0.05:
         with torch.no_grad():
             # Return the action with the maximum Q value for the current state
             return policy_net(state).max(1)[1].view(1, 1)
@@ -315,7 +316,7 @@ def optimize_model():
 PATH = "./deepQ.pt"
 
 def train_model(num_frames):
-    env = Atari('BeamRiderDeterministic-v4')
+    env = Atari('BreakoutDeterministic-v4')
     cumulative_frames = 0
     while cumulative_frames < num_frames:
         print("=============================================")
@@ -328,7 +329,7 @@ def train_model(num_frames):
         while not done:
             action = select_action(state)
 
-            next_state, memory_next_state, reward, done, life_lost, _ = env.step(actions[action.item()])
+            next_state, memory_next_state, reward, done, life_lost, _ = env.step(action.item())
             game_score += reward
             if life_lost:
                 reward = -1
@@ -382,7 +383,7 @@ def inference(episodes, model):
 
 import time
 def main():
-    train_model(10000000)
+    train_model(10000)
     # model = load_agent()
     # inference(100, model)
 
