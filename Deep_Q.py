@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+
 import gym
 import numpy as np
 import math
@@ -9,8 +10,10 @@ import cv2
 from collections import deque, namedtuple
 import random
 
+from wrappers import wrap_deepmind
 
-env = gym.make('BreakoutDeterministic-v4')
+
+env = gym.make('PongDeterministic-v4')
 # env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -36,12 +39,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # }
 
 n_actions = env.action_space.n
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward', 'done'))
-
-
-
-
 
 class DeepQNet(nn.Module):
     def __init__(self, h, w):
@@ -72,15 +69,6 @@ class DeepQNet(nn.Module):
         x = F.relu(self.fc1(x.view(x.size(0), -1)))
         x = self.out(x)
         return x
-
-
-def clip_reward(reward):
-    if reward > 0:
-        return 1
-    elif reward == 0:
-        return 0
-    else:
-        return -1
 
 
 class ReplayMemory(object):
@@ -135,7 +123,6 @@ class ReplayMemory(object):
         self.terminal_flags[self.current] = terminal
         self.count = max(self.count, self.current+1)
         self.current = (self.current + 1) % self.size
-
     def _get_state(self, index):
         if self.count == 0:
             raise ValueError("The replay memory is empty!")
@@ -173,36 +160,37 @@ class ReplayMemory(object):
         return self.states, self.actions[self.indices], self.rewards[self.indices], self.new_states, self.terminal_flags[self.indices]
 
 
-
 class Atari(object):
     def __init__(self, envName, agent_history_length=4):
         self.env = gym.make(envName)
+        self.env = wrap_deepmind(env)
+        
         self.agent_history_length = agent_history_length
         self.state = None
         self.last_lives = 0
 
     def reset(self):
         frame = self.env.reset()
+        frame = frame.reshape(1, HEIGHT, WIDTH)
+                
+        self.state = np.repeat(frame, self.agent_history_length, axis=0)
         
-        processed_frame = convert_screen(frame)
-        self.state = np.repeat(processed_frame, self.agent_history_length, axis=0)
-        
-        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), processed_frame
+        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), frame
     
     def step(self, action):
-        self.env.render()
         new_frame, reward, terminal, info = self.env.step(action) 
+        new_frame = new_frame.reshape(1, HEIGHT, WIDTH)
+
         if info['ale.lives'] < self.last_lives:
             terminal_life_lost = True
         else:
             terminal_life_lost = terminal
         self.last_lives = info['ale.lives']
-        processed_new_frame = convert_screen(new_frame)
         new_state = np.append(
-            self.state[1:, :, :], processed_new_frame, axis=0)
+            self.state[1:, :, :], new_frame, axis=0)
         self.state = new_state
        
-        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), processed_new_frame, reward, terminal, terminal_life_lost, info
+        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), new_frame, reward, terminal, terminal_life_lost, info
 
 
 def convert_screen(screen):
@@ -222,43 +210,53 @@ def convert_screen(screen):
 
 
 BATCH_SIZE = 32
-GAMMA = 0.999
-EPS_START = 0.9
+GAMMA = 0.99
+EPS_START = 1
 EPS_END = 0.1
-DECAY_RATE = -0.0000009
+NUMBER_OF_FRAMES = 15000000
 TARGET_UPDATE = 10000
+ANNELING_FRAMES = 1000000
 
 HEIGHT = 84
 WIDTH = 84
 EPSILON = 0
+MEM_SIZE = 1000000
+LEARNING_STARTS = 50000
+
+UPDATE_FREQ = 4
+LEARNING_RATE = 0.00025
+
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
 
-optimizer = torch.optim.RMSprop(policy_net.parameters(), lr=0.0001)
-memory = ReplayMemory(10000)
+optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
+memory = ReplayMemory(MEM_SIZE)
 steps_done = 0
 
-def get_epsilon(rate, current_step):
-    eps_threshold = rate * current_step + 1
+def get_epsilon(current_step):
+    rate = (EPS_END-EPS_START)/ANNELING_FRAMES
+    eps_threshold = rate * current_step + EPS_START
     if eps_threshold < EPS_END:
         return EPS_END
     return eps_threshold
 
-def select_action(state):
-    global steps_done
+def select_action(state, steps_done, eval=False):
     global EPSILON
 
     # This equation is for the decaying epsilon
-    eps_threshold = get_epsilon(DECAY_RATE, steps_done)
-    steps_done += 1
-
+    eps_threshold = 0
+    if eval:
+        eps_threshold = EPS_END
     r = np.random.rand()
 
+    if steps_done <= LEARNING_STARTS:
+        eps_threshold = EPS_START
+    else:
+        eps_threshold = get_epsilon(steps_done - LEARNING_STARTS)
     EPSILON = eps_threshold
-
     # We select an action with an espilon greedy policy 
-    if r > 0.05:
+    if r > eps_threshold:
         with torch.no_grad():
             # Return the action with the maximum Q value for the current state
             return policy_net(state).max(1)[1].view(1, 1)
@@ -267,94 +265,84 @@ def select_action(state):
 
 
 def optimize_model():
-    if memory.current < memory.batch_size:
+    if memory.current < LEARNING_STARTS:
         return 0
-    states, actions, rewards, next_states, terminals = memory.get_minibatch()
-    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
-    # detailed explanation). This converts batch-array of Transitions
-    # to Transition of batch-arrays.
-
-    # Compute a mask of non-final states and concatenate the batch elements
-    # (a final state would've been the one after which simulation ended)
-
-    non_final_mask = terminals != None
-    non_final_next_states = torch.from_numpy(next_states[non_final_mask]).to(device=device)
-                 
-    state_batch = torch.from_numpy(states).to(device=device)
-    action_batch = torch.from_numpy(actions).to(device=device).reshape((memory.batch_size, 1))
-    reward_batch = torch.from_numpy(rewards).to(device=device)
-
-    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
-    # columns of actions taken. These are the actions which would've been taken
-    # for each batch state according to policy_net
-    state_action_values = policy_net(state_batch).gather(1, action_batch.long())
-
-    # Compute V(s_{t+1}) for all next states.
-    # Expected values of actions for non_final_next_states are computed based
-    # on the "older" target_net; selecting their best reward with max(1)[0].
-    # This is merged based on the mask, such that we'll have either the expected
-    # state value or 0 in case the state was final.
-    next_state_values = torch.zeros(BATCH_SIZE, device=device)
-    next_state_values[non_final_mask] = target_net(
-        non_final_next_states).max(1)[0].detach()
-    # Compute the expected Q values
-    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
-
-    # Compute Huber loss
-    loss = F.smooth_l1_loss(state_action_values,
-                            expected_state_action_values.unsqueeze(1))
-
-    # Optimize the model
     optimizer.zero_grad()
+
+    states, actions, rewards, next_states, dones = memory.get_minibatch()
+    states_v = torch.tensor(states).to(device)
+    next_states_v = torch.tensor(next_states).to(device)
+    actions_v = torch.tensor(actions).to(device)
+    rewards_v = torch.tensor(rewards).to(device)
+    done = torch.tensor(dones).to(device)
+
+    state_action_values = policy_net(states_v).gather(
+        1, actions_v.long().unsqueeze(-1)).squeeze(-1)
+    next_state_values = target_net(next_states_v).max(1)[0]
+    next_state_values[done] = 0.0
+    next_state_values = next_state_values.detach()
+
+    expected_state_action_values = next_state_values * GAMMA + rewards_v
+     
+    # Compute Huber loss
+    # Optimize the model
+    loss = nn.MSELoss()(state_action_values, expected_state_action_values)
     loss.backward()
-    for param in policy_net.parameters():
-        param.grad.data.clamp_(-1, 1)
-    optimizer.step()
-    
+    optimizer.step() 
     return loss.item()
 
 PATH = "./deepQ.pt"
 
 def train_model(num_frames):
-    env = Atari('BreakoutDeterministic-v4')
+    env = Atari('PongDeterministic-v4')
+    
     cumulative_frames = 0
-    while cumulative_frames < num_frames:
-        print("=============================================")
+    best_score = 0
+    games = 0
+    full_loss = []
+    rewards = []
+    while 1:
         state, memory_state = env.reset()
         done = False
-        game_score = 0
-        current_frames = cumulative_frames
         cum_reward = 0
-        cum_loss = 0
+        cum_loss = []
         while not done:
-            action = select_action(state)
+            action = select_action(state, cumulative_frames)
 
             next_state, memory_next_state, reward, done, life_lost, _ = env.step(action.item())
-            game_score += reward
-            if life_lost:
-                reward = -1
-            reward = clip_reward(reward)
-           
-            if done:
-                next_state = None
 
             memory.add_experience(action.item(), memory_state.reshape(HEIGHT, WIDTH), reward, life_lost)
 
 
             state = next_state
             memory_state = memory_next_state
-            loss = optimize_model()
+            if cumulative_frames % UPDATE_FREQ == 0 and cumulative_frames > LEARNING_STARTS:
+                loss = optimize_model()
+                cum_loss.append(loss)
             cum_reward += reward
             cumulative_frames += 1
-            cum_loss += loss
-        print("Current Frame: {}".format(cumulative_frames))
-        print("Avg Episode Loss:{}".format(cum_loss/(cumulative_frames-current_frames)))
-        print("Final reward: {}".format(cum_reward))
-        print("Epsilon after: {}".format(EPSILON))
-        print("Cumulative Frames: {}".format(cumulative_frames))
-        print("Final Game Score: {}".format(game_score))
+        
+        if best_score < cum_reward:
+            best_score = cum_reward
+        if len(cum_loss) == 0:
+            full_loss.append(0)
+        else:
+            full_loss.append(np.mean(cum_loss))
+        rewards.append(cum_reward)
+        games += 1
         if cumulative_frames % TARGET_UPDATE == 0:
             target_net.load_state_dict(policy_net.state_dict())
+        if games % 10 == 0:
+            print("=============================================")
+            print("Game: {} | Frame {}".format(games, cumulative_frames))
+            print("Final reward: {}".format(cum_reward))
+            print("Epsilon after: {}".format(EPSILON))
+            print("Best High Score: {}".format(best_score))
+            print("Avg Loss Last 100 games: {}".format(np.mean(full_loss[-100:])))
+            print("Avg Reward Last 100 games: {}".format(np.mean(rewards[-100:])))
+        
+        if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
+            break
 
     torch.save(target_net.state_dict(), PATH)
 
@@ -366,24 +354,20 @@ def load_agent():
 
 
 def inference(episodes, model):
+    env = Atari('BreakoutNoFrameskip-v4')
     for episode in range(episodes):
-        observation = env.reset()
+        observation, _ = env.reset()
         done = False
         while not done:
-            env.render()
+            env.env.render()
             with torch.no_grad():
-                state = torch.tensor(convert_screen(
-                    observation).reshape(-1, 1, 84, 84), device=device)
-                r = np.random.rand()
-                if r < 0.9:
-                    action = actions[model(state).max(1)[1].view(1, 1).item()]
-                else:
-                    action = np.random.choice(actions)
-                observation, _, done, _ = env.step(action)
+                action = select_action(observation, True)
+                observation, _, reward, done, _, _ = env.step(action.item())
+                if reward != 0:
+                    print(reward)
 
-import time
 def main():
-    train_model(10000)
+    train_model(NUMBER_OF_FRAMES)
     # model = load_agent()
     # inference(100, model)
 
