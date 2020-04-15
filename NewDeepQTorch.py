@@ -2,23 +2,47 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+
 import gym
 import numpy as np
 import math
 import cv2
 from collections import deque, namedtuple
 import random
-from wrappers import wrap_deepmind
 
-env = gym.make('BreakoutNoFrameskip-v4')
+from wrappers import wrap_deepmind, make_atari
+
+
+e = gym.make('PongNoFrameskip-v4')
+# env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-n_actions = env.action_space.n
 
-Experience = namedtuple('Experience', field_names=[
-                        'state', 'action', 'reward', 'done', 'new_state'])
+# ACTION_MEANING = {
+#     0: "NOOP",
+#     1: "FIRE",
+#     2: "UP",
+#     3: "RIGHT",
+#     4: "LEFT",
+#     5: "DOWN",
+#     6: "UPRIGHT",
+#     7: "UPLEFT",
+#     8: "DOWNRIGHT",
+#     9: "DOWNLEFT",
+#     10: "UPFIRE",
+#     11: "RIGHTFIRE",
+#     12: "LEFTFIRE",
+#     13: "DOWNFIRE",
+#     14: "UPRIGHTFIRE",
+#     15: "UPLEFTFIRE",
+#     16: "DOWNRIGHTFIRE",
+#     17: "DOWNLEFTFIRE",
+# }
+
+n_actions = e.action_space.n
+
 
 class DeepQNet(nn.Module):
-    def __init__(self, n_actions, h, w):
+    def __init__(self, h, w):
         super(DeepQNet, self).__init__()
         self.conv1 = nn.Conv2d(4, 32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
@@ -45,177 +69,268 @@ class DeepQNet(nn.Module):
         return x
 
 
-
-class ReplayMemory:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+class ReplayBuffer(object):
+    def __init__(self, size):
+        """Create Replay buffer.
+        Parameters
+        ----------
+        size: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        """
+        self._storage = []
+        self._maxsize = size
+        self._next_idx = 0
 
     def __len__(self):
-        return len(self.buffer)
+        return len(self._storage)
 
-    def append(self, experience):
-        self.buffer.append(experience)
+    def add(self, obs_t, action, reward, obs_tp1, done):
+        data = (obs_t, action, reward, obs_tp1, done)
+
+        if self._next_idx >= len(self._storage):
+            self._storage.append(data)
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+    def _encode_sample(self, idxes):
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            data = self._storage[i]
+            obs_t, action, reward, obs_tp1, done = data
+            obses_t.append(np.array(obs_t, copy=False))
+            actions.append(np.array(action, copy=False))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1, copy=False))
+            dones.append(done)
+        return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
     def sample(self, batch_size):
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
-        states, actions, rewards, dones, next_states = zip(
-            *[self.buffer[idx] for idx in indices])
-        return np.array(states), np.array(actions), np.array(rewards, dtype=np.float32), \
-            np.array(dones, dtype=np.uint8), np.array(next_states)
-
-
-
+        """Sample a batch of experiences.
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+        Returns
+        -------
+        obs_batch: np.array
+            batch of observations
+        act_batch: np.array
+            batch of actions executed given obs_batch
+        rew_batch: np.array
+            rewards received as results of executing act_batch
+        next_obs_batch: np.array
+            next set of observations seen after executing act_batch
+        done_mask: np.array
+            done_mask[i] = 1 if executing act_batch[i] resulted in
+            the end of an episode and 0 otherwise.
+        """
+        idxes = [random.randint(0, len(self._storage) - 1)
+                 for _ in range(batch_size)]
+        return self._encode_sample(idxes)
 
 BATCH_SIZE = 32
-GAMMA = 0.999
-EPS_START = 0.9
-EPS_END = 0.05
-TARGET_UPDATE = 10000
-
+GAMMA = 0.99
+EPS_START = 1
+EPS_END = 0.02
+EPS_DECAY = 30000
+NUMBER_OF_FRAMES = 100000
+TARGET_UPDATE = 500
+ANNELING_FRAMES = 1000000
 
 HEIGHT = 84
 WIDTH = 84
 EPSILON = 0
-MEM_SIZE = 1000000
-LEARNING_STARTS = 50000
-
-LEARNING_RATE = 0.00025
-ALPHA = 0.95
-EPS = 0.01
-
-policy_net = DeepQNet(n_actions, HEIGHT, WIDTH).to(device)
-target_net = DeepQNet(n_actions, HEIGHT, WIDTH).to(device)
+MEM_SIZE = 50000
+LEARNING_STARTS = 1000
 
 
-optimizer = torch.optim.RMSprop(policy_net.parameters(), lr=LEARNING_RATE, alpha=ALPHA, eps=EPS)
-memory = ReplayMemory(int(MEM_SIZE))
+LEARNING_RATE = 5e-4
+
+
+policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
+target_net = DeepQNet(HEIGHT, WIDTH).to(device)
+
+optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
+memory = ReplayBuffer(MEM_SIZE)
+steps_done = 0
 
 
 def get_epsilon(current_step):
-    rate = (EPS_END-EPS_START)/MEM_SIZE
-    eps_threshold = rate * current_step + EPS_START
-    if eps_threshold < EPS_END:
-        return EPS_END
-    return eps_threshold
+    eps = EPS_END + (EPS_START - EPS_END) * \
+        np.exp(-1 * current_step / EPS_DECAY)
+    if eps < EPS_END:
+        eps = EPS_END
+    return eps
+    # rate = (EPS_END-EPS_START)/ANNELING_FRAMES
+    # eps_threshold = rate * current_step + EPS_START
+    # if eps_threshold < EPS_END:
+    #     return EPS_END
+    # return eps_threshold
 
 
 def select_action(state, steps_done, eval=False):
     global EPSILON
-
     # This equation is for the decaying epsilon
-    eps_threshold = get_epsilon(steps_done)
-
+    eps_threshold = 0
     if eval:
         eps_threshold = EPS_END
-
     r = np.random.rand()
 
+    if steps_done <= LEARNING_STARTS:
+        eps_threshold = EPS_START
+    else:
+        eps_threshold = get_epsilon(steps_done - LEARNING_STARTS)
     EPSILON = eps_threshold
-
     # We select an action with an espilon greedy policy
     if r > eps_threshold:
         with torch.no_grad():
             # Return the action with the maximum Q value for the current state
-            return policy_net(torch.tensor(state).to(device)).max(1)[1].view(1, 1)
+            return policy_net(state).max(1)[1].item()
     else:
-        return torch.tensor([[random.randrange(n_actions)]], device=device)
+        return np.random.randint(0, n_actions)
 
 
-def optimize_model():
-    if memory.__len__() < LEARNING_STARTS:
+def optimize_model(t):
+    if t < LEARNING_STARTS:
         return 0
 
-    states, actions, rewards, dones, next_states = memory.sample(BATCH_SIZE) 
-    states_v = torch.tensor(states.reshape(-1, 4, 84, 84)).to(device)
-    next_states_v = torch.tensor(next_states.reshape(-1, 4, 84, 84)).to(device)
-    actions_v = torch.tensor(actions).to(device)
-    rewards_v = torch.tensor(rewards).to(device)
-    done = torch.tensor(dones, dtype=torch.bool).to(device)
+    states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
 
-    state_action_values = policy_net(states_v).gather(
-        1, actions_v.long().unsqueeze(-1)).squeeze(-1)
-    next_state_values = target_net(next_states_v).max(1)[0]
-    next_state_values[done] = 0.0
-    next_state_values = next_state_values.detach()
 
-    expected_state_action_values = next_state_values * GAMMA + rewards_v
+    states = np.array(states).reshape(-1, 4, HEIGHT, WIDTH)
+    next_states = np.array(next_states).reshape(-1, 4, HEIGHT, WIDTH)
+
+    states = torch.FloatTensor(states).to(device)
+    actions = torch.LongTensor(actions).to(device)
+    rewards = torch.FloatTensor(rewards).to(device)
+    next_states = torch.FloatTensor(next_states).to(device)
+    dones = torch.FloatTensor(dones).to(device)
+
+    curr_Q = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
+    next_Q = target_net(next_states)
+    max_next_Q = torch.max(next_Q, 1)[0].squeeze()
+    expected_Q = rewards + (1 - dones) * GAMMA * max_next_Q
 
     # Compute Huber loss
-    loss = F.smooth_l1_loss(state_action_values,
-                            expected_state_action_values)
+    loss = F.smooth_l1_loss(curr_Q,
+                            expected_Q)
+
     # Optimize the model
     optimizer.zero_grad()
     loss.backward()
+    for param in policy_net.parameters():
+        param.grad.data.clamp_(-1, 1)
     optimizer.step()
-
     return loss.item()
 
 
+PATH = "./deepQ.pt"
+
+
 def train_model(num_frames):
-    env = gym.make('BreakoutNoFrameskip-v4')
-    env = wrap_deepmind(env)
+    env = make_atari('PongNoFrameskip-v4')
+    env = wrap_deepmind(env,episode_life=True, frame_stack=True)
+
     cumulative_frames = 0
-
-    highest_score = 0
-    current_cum_loss = []
-    current_game_score = 0
-    new_game = True
+    best_score = -50
     games = 0
-
-    losses = []
-    scores = []
-    while cumulative_frames < num_frames:
-        if new_game:
-            print("============================")
-            print("Game: {} | Frame {}".format(games, cumulative_frames))
-            new_game = False
+    full_loss = []
+    rewards = []
+    while 1:
         state = env.reset()
         done = False
-
+        cum_reward = 0
+        cum_loss = []
         while not done:
-            action = select_action(
-                state.__array__().reshape(-1, 4, 84, 84), cumulative_frames).item()
+            action = select_action(torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
 
-            next_state, reward, done, info = env.step(action)
+            next_state, reward, done, _ = env.step(action)
 
-            memory.append(Experience(state, action, reward, done, next_state))
+            memory.add(state, action, reward, next_state, reward)
 
             state = next_state
-            loss = optimize_model()
-
-            current_cum_loss.append(loss)
-
-            current_game_score += reward
+            # if cumulative_frames % UPDATE_FREQ == 0 and cumulative_frames > LEARNING_STARTS:
+            loss = optimize_model(cumulative_frames)
+            cum_loss.append(loss)
+            cum_reward += reward
             cumulative_frames += 1
+        
+            if cumulative_frames % TARGET_UPDATE == 0:
+                target_net.load_state_dict(policy_net.state_dict())
 
-            if info['ale.lives'] == 0:
-                if highest_score < current_game_score:
-                    highest_score = current_game_score
+        if best_score < cum_reward:
+            best_score = cum_reward
+        if len(cum_loss) == 0:
+            full_loss.append(0)
+        else:
+            full_loss.append(np.mean(cum_loss))
+        rewards.append(cum_reward)
+        games += 1
 
-                current_loss = np.mean(current_cum_loss)
-                losses.append(current_loss)
-                scores.append(current_game_score)
+        if games % 10 == 0:
+            print("=============================================")
+            print("Game: {} | Frame {}".format(games, cumulative_frames))
+            print("Final reward: {}".format(cum_reward))
+            print("Epsilon after: {}".format(EPSILON))
+            print("Best High Score: {}".format(best_score))
+            print("Avg Loss Last 100 games: {}".format(
+                np.mean(full_loss[-100:])))
+            print("Avg Reward Last 100 games: {}".format(
+                np.mean(rewards[-100:])))
 
-                print("Current game score: {}".format(current_game_score))
-                print("Current loss: {}".format(current_loss))
-                print("Highest Score: {}".format(highest_score))
-                print("Average loss last 50 games: {}".format(
-                    np.mean(losses[-50:])))
-                print("Average score last 50 games: {}".format(
-                    np.mean(scores[-50:])))
+        if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
+            break
 
-                current_game_score = 0
-                current_cum_loss = []
-                new_game = True
-                games += 1
-        if cumulative_frames % TARGET_UPDATE == 0:
-            target_net.load_state_dict(policy_net.state_dict())
+    torch.save(target_net.state_dict(), PATH)
 
-    torch.save(target_net.state_dict(), './net.pt')
-    return losses, scores
+
+def load_agent():
+    model = DeepQNet(HEIGHT, WIDTH).to(device)
+    model.load_state_dict(torch.load(PATH, map_location=torch.device('cpu')))
+    model.eval()
+    return model
+
+
+def inference(episodes, model):
+    env = Atari('BreakoutNoFrameskip-v4')
+    for episode in range(episodes):
+        observation, _ = env.reset()
+        done = False
+        while not done:
+            env.env.render()
+            with torch.no_grad():
+                action = select_action(observation, True)
+                observation, _, reward, done, _, _ = env.step(action.item())
+                if reward != 0:
+                    print(reward)
 
 
 def main():
-    train_model(1000000)
+    train_model(NUMBER_OF_FRAMES)
+    # model = load_agent()
+    # inference(100, model)
+
 if __name__ == '__main__':
     main()
+
+
+
+# for i_episode in range(100):
+#     observation = env.reset()
+#     done = False
+#     print("HERE")
+
+#     while not done:
+#         env.render()
+#         action = env.action_space.sample()
+#         # action = np.random.randint(3,5)
+#         observation, reward, done, info = env.step(action)
+#         if reward > 0:
+#             print(reward)
+#         elif reward < 0:
+#             print(reward)
+#         if done:
+#             print("Episode finished")
+# env.close()

@@ -271,6 +271,39 @@ class LazyFrames(object):
         return self._force()[..., i]
 
 
+class TimeLimit(gym.Wrapper):
+    def __init__(self, env, max_episode_steps=None):
+        super(TimeLimit, self).__init__(env)
+        self._max_episode_steps = max_episode_steps
+        self._elapsed_steps = 0
+
+    def step(self, ac):
+        observation, reward, done, info = self.env.step(ac)
+        self._elapsed_steps += 1
+        if self._elapsed_steps >= self._max_episode_steps:
+            done = True
+            info['TimeLimit.truncated'] = True
+        return observation, reward, done, info
+
+    def reset(self, **kwargs):
+        self._elapsed_steps = 0
+        return self.env.reset(**kwargs)
+
+
+class ImageToPyTorch(gym.ObservationWrapper):
+    """
+    Image shape to num_channels x weight x height
+    """
+
+    def __init__(self, env):
+        super(ImageToPyTorch, self).__init__(env)
+        old_shape = self.observation_space.shape
+        self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(
+            old_shape[-1], old_shape[0], old_shape[1]), dtype=np.uint8)
+
+    def observation(self, observation):
+        return np.swapaxes(observation, 2, 0)
+
 def make_atari(env_id, max_episode_steps=None):
     env = gym.make(env_id)
     assert 'NoFrameskip' in env.spec.id
@@ -296,3 +329,8 @@ def wrap_deepmind(env, episode_life=False, clip_rewards=True, frame_stack=False,
     if frame_stack:
         env = FrameStack(env, 4)
     return env
+
+def final_wrap(env_id):
+    env = make_atari(env_id)
+    env = wrap_deepmind(env)
+    return ImageToPyTorch(env)

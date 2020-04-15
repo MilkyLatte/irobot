@@ -10,10 +10,10 @@ import cv2
 from collections import deque, namedtuple
 import random
 
-from wrappers import wrap_deepmind
+from wrappers import final_wrap
 
 
-env = gym.make('PongDeterministic-v4')
+e = gym.make('PongNoFrameskip-v4')
 # env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -38,7 +38,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #     17: "DOWNLEFTFIRE",
 # }
 
-n_actions = env.action_space.n
+n_actions = e.action_space.n
 
 class DeepQNet(nn.Module):
     def __init__(self, h, w):
@@ -162,8 +162,7 @@ class ReplayMemory(object):
 
 class Atari(object):
     def __init__(self, envName, agent_history_length=4):
-        self.env = gym.make(envName)
-        self.env = wrap_deepmind(env)
+        self.env = final_wrap(envName)
         
         self.agent_history_length = agent_history_length
         self.state = None
@@ -171,15 +170,13 @@ class Atari(object):
 
     def reset(self):
         frame = self.env.reset()
-        frame = frame.reshape(1, HEIGHT, WIDTH)
-                
+          
         self.state = np.repeat(frame, self.agent_history_length, axis=0)
         
-        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), frame
+        return torch.tensor(self.state, device=device).unsqueeze(0), frame
     
     def step(self, action):
         new_frame, reward, terminal, info = self.env.step(action) 
-        new_frame = new_frame.reshape(1, HEIGHT, WIDTH)
 
         if info['ale.lives'] < self.last_lives:
             terminal_life_lost = True
@@ -190,7 +187,7 @@ class Atari(object):
             self.state[1:, :, :], new_frame, axis=0)
         self.state = new_state
        
-        return torch.tensor(self.state.reshape(-1, 4, HEIGHT, WIDTH), device=device), new_frame, reward, terminal, terminal_life_lost, info
+        return torch.tensor(self.state, device=device).unsqueeze(0), new_frame, reward, terminal, terminal_life_lost, info
 
 
 def convert_screen(screen):
@@ -212,19 +209,20 @@ def convert_screen(screen):
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
-EPS_END = 0.1
-NUMBER_OF_FRAMES = 15000000
-TARGET_UPDATE = 10000
+EPS_END = 0.02
+EPS_DECAY = 30000
+NUMBER_OF_FRAMES = 10000000
+TARGET_UPDATE = 1000
 ANNELING_FRAMES = 1000000
 
 HEIGHT = 84
 WIDTH = 84
 EPSILON = 0
-MEM_SIZE = 1000000
-LEARNING_STARTS = 50000
+MEM_SIZE = 40000
+LEARNING_STARTS = 1000
 
-UPDATE_FREQ = 4
-LEARNING_RATE = 0.00025
+
+LEARNING_RATE = 5e-4
 
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -235,15 +233,19 @@ memory = ReplayMemory(MEM_SIZE)
 steps_done = 0
 
 def get_epsilon(current_step):
-    rate = (EPS_END-EPS_START)/ANNELING_FRAMES
-    eps_threshold = rate * current_step + EPS_START
-    if eps_threshold < EPS_END:
-        return EPS_END
-    return eps_threshold
+    eps = EPS_END + (EPS_START - EPS_END) * \
+        np.exp(-1 * current_step/ EPS_DECAY)
+    if eps < EPS_END:
+        eps = EPS_END
+    return eps
+    # rate = (EPS_END-EPS_START)/ANNELING_FRAMES
+    # eps_threshold = rate * current_step + EPS_START
+    # if eps_threshold < EPS_END:
+    #     return EPS_END
+    # return eps_threshold
 
 def select_action(state, steps_done, eval=False):
     global EPSILON
-
     # This equation is for the decaying epsilon
     eps_threshold = 0
     if eval:
@@ -259,42 +261,45 @@ def select_action(state, steps_done, eval=False):
     if r > eps_threshold:
         with torch.no_grad():
             # Return the action with the maximum Q value for the current state
-            return policy_net(state).max(1)[1].view(1, 1)
+            return policy_net(state).max(1)[1].item()
     else:
-        return torch.tensor([[random.randrange(n_actions)]], device=device)
+        return np.random.randint(0, n_actions)
 
 
 def optimize_model():
     if memory.current < LEARNING_STARTS:
         return 0
-    optimizer.zero_grad()
 
     states, actions, rewards, next_states, dones = memory.get_minibatch()
-    states_v = torch.tensor(states).to(device)
-    next_states_v = torch.tensor(next_states).to(device)
-    actions_v = torch.tensor(actions).to(device)
-    rewards_v = torch.tensor(rewards).to(device)
-    done = torch.tensor(dones).to(device)
 
-    state_action_values = policy_net(states_v).gather(
-        1, actions_v.long().unsqueeze(-1)).squeeze(-1)
-    next_state_values = target_net(next_states_v).max(1)[0]
-    next_state_values[done] = 0.0
-    next_state_values = next_state_values.detach()
 
-    expected_state_action_values = next_state_values * GAMMA + rewards_v
-     
+    states = torch.FloatTensor(states).to(device)
+    actions = torch.LongTensor(actions).to(device)
+    rewards = torch.FloatTensor(rewards).to(device)
+    next_states = torch.FloatTensor(next_states).to(device)
+    dones = torch.FloatTensor(dones).to(device)
+
+    curr_Q = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
+    next_Q = target_net(next_states)
+    max_next_Q = torch.max(next_Q, 1)[0].squeeze()
+    expected_Q = rewards + (1 - dones) * GAMMA * max_next_Q
+    
     # Compute Huber loss
+    loss = F.smooth_l1_loss(curr_Q,
+                            expected_Q)
+
     # Optimize the model
-    loss = nn.MSELoss()(state_action_values, expected_state_action_values)
+    optimizer.zero_grad()
     loss.backward()
-    optimizer.step() 
+    for param in policy_net.parameters():
+        param.grad.data.clamp_(-1, 1)
+    optimizer.step()
     return loss.item()
 
 PATH = "./deepQ.pt"
 
 def train_model(num_frames):
-    env = Atari('PongDeterministic-v4')
+    env = Atari('PongNoFrameskip-v4')
     
     cumulative_frames = 0
     best_score = 0
@@ -309,18 +314,21 @@ def train_model(num_frames):
         while not done:
             action = select_action(state, cumulative_frames)
 
-            next_state, memory_next_state, reward, done, life_lost, _ = env.step(action.item())
+            next_state, memory_next_state, reward, done, life_lost, _ = env.step(action)
 
-            memory.add_experience(action.item(), memory_state.reshape(HEIGHT, WIDTH), reward, life_lost)
+            memory.add_experience(action, memory_state.reshape(HEIGHT, WIDTH), reward, life_lost)
 
 
             state = next_state
             memory_state = memory_next_state
-            if cumulative_frames % UPDATE_FREQ == 0 and cumulative_frames > LEARNING_STARTS:
-                loss = optimize_model()
-                cum_loss.append(loss)
+            # if cumulative_frames % UPDATE_FREQ == 0 and cumulative_frames > LEARNING_STARTS:
+            loss = optimize_model()
+            cum_loss.append(loss)
             cum_reward += reward
             cumulative_frames += 1
+            if cumulative_frames % TARGET_UPDATE == 0:
+                print("HERE")
+                target_net.load_state_dict(policy_net.state_dict())
         
         if best_score < cum_reward:
             best_score = cum_reward
@@ -330,8 +338,7 @@ def train_model(num_frames):
             full_loss.append(np.mean(cum_loss))
         rewards.append(cum_reward)
         games += 1
-        if cumulative_frames % TARGET_UPDATE == 0:
-            target_net.load_state_dict(policy_net.state_dict())
+
         if games % 10 == 0:
             print("=============================================")
             print("Game: {} | Frame {}".format(games, cumulative_frames))
