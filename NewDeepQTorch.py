@@ -9,6 +9,7 @@ import math
 import cv2
 from collections import deque, namedtuple
 import random
+import time
 
 from wrappers import wrap_deepmind, make_atari
 
@@ -177,18 +178,17 @@ def get_epsilon(current_step):
     # return eps_threshold
 
 
-def select_action(state, steps_done, eval=False):
+def select_action(state, steps_done):
     global EPSILON
     # This equation is for the decaying epsilon
     eps_threshold = 0
-    if eval:
-        eps_threshold = EPS_END
     r = np.random.rand()
 
     if steps_done <= LEARNING_STARTS:
         eps_threshold = EPS_START
     else:
         eps_threshold = get_epsilon(steps_done - LEARNING_STARTS)
+
     EPSILON = eps_threshold
     # We select an action with an espilon greedy policy
     if r > eps_threshold:
@@ -301,25 +301,36 @@ def load_agent():
     model.eval()
     return model
 
+def eval_action(state, model):
+    r = np.random.rand()
+    if r > EPS_END:
+        with torch.no_grad():
+            # Return the action with the maximum Q value for the current state
+            return model(state).max(1)[1].item()
+    else:
+        return np.random.randint(0, n_actions)
 
-def inference(episodes, model):
-    env = Atari('BreakoutNoFrameskip-v4')
-    for episode in range(episodes):
-        observation, _ = env.reset()
+def inference(episodes, model, env_name):
+    env = make_atari(env_name)
+    env = wrap_deepmind(env, episode_life=True, frame_stack=True)
+    for _ in range(episodes):
+        observation = env.reset()
         done = False
         while not done:
-            env.env.render()
+            time.sleep(0.05)
+            env.render()
+            observation = torch.tensor(np.array(observation).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
             with torch.no_grad():
-                action = select_action(observation, True)
-                observation, _, reward, done, _, _ = env.step(action.item())
+                action = model(observation).max(1)[1].item()
+                observation, reward, done, _ = env.step(action)
                 if reward != 0:
                     print(reward)
 
 
 def main():
-    train_model(NUMBER_OF_FRAMES)
-    # model = load_agent()
-    # inference(100, model)
+    # train_model(NUMBER_OF_FRAMES)
+    model = load_agent()
+    inference(100, model, 'PongNoFrameskip-v4')
 
 if __name__ == '__main__':
     main()

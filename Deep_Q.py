@@ -248,8 +248,6 @@ def select_action(state, steps_done, eval=False):
     global EPSILON
     # This equation is for the decaying epsilon
     eps_threshold = 0
-    if eval:
-        eps_threshold = EPS_END
     r = np.random.rand()
 
     if steps_done <= LEARNING_STARTS:
@@ -257,6 +255,8 @@ def select_action(state, steps_done, eval=False):
     else:
         eps_threshold = get_epsilon(steps_done - LEARNING_STARTS)
     EPSILON = eps_threshold
+    if eval:
+        eps_threshold = EPS_END
     # We select an action with an espilon greedy policy 
     if r > eps_threshold:
         with torch.no_grad():
