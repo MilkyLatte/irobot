@@ -133,17 +133,22 @@ class ReplayBuffer(object):
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
-EPS_END = 0.02
-EPS_DECAY = 30000
-NUMBER_OF_FRAMES = 100000
-TARGET_UPDATE = 500
-ANNELING_FRAMES = 1000000
+EPS_END = 0.01
+EXP_FRACTION = 0.1
+NUMBER_OF_FRAMES = 1e7
+
+TARGET_UPDATE = 1000
+# ANNELING_FRAMES = 1000000
+
+TRAIN_FREQUENCY = 4
 
 HEIGHT = 84
 WIDTH = 84
 EPSILON = 0
-MEM_SIZE = 50000
-LEARNING_STARTS = 1000
+MEM_SIZE = 10000
+LEARNING_STARTS = 10000
+
+SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
 
 LEARNING_RATE = 5e-4
@@ -158,11 +163,13 @@ steps_done = 0
 
 
 def get_epsilon(current_step):
-    eps = EPS_END + (EPS_START - EPS_END) * \
-        np.exp(-1 * current_step / EPS_DECAY)
+    fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
+    eps = EPS_START + fraction * (EPS_END - EPS_START)
     if eps < EPS_END:
         eps = EPS_END
     return eps
+
+
     # rate = (EPS_END-EPS_START)/ANNELING_FRAMES
     # eps_threshold = rate * current_step + EPS_START
     # if eps_threshold < EPS_END:
@@ -251,9 +258,10 @@ def train_model(num_frames):
             memory.add(state, action, reward, next_state, reward)
 
             state = next_state
-            # if cumulative_frames % UPDATE_FREQ == 0 and cumulative_frames > LEARNING_STARTS:
-            loss = optimize_model(cumulative_frames)
-            cum_loss.append(loss)
+            if cumulative_frames % TRAIN_FREQUENCY == 0 and cumulative_frames > LEARNING_STARTS:
+                loss = optimize_model(cumulative_frames)
+                cum_loss.append(loss)
+            
             cum_reward += reward
             cumulative_frames += 1
         
