@@ -151,7 +151,7 @@ LEARNING_STARTS = 10000
 SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
 
-LEARNING_RATE = 5e-4
+LEARNING_RATE = 1e-4
 
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -213,12 +213,13 @@ def optimize_model(t):
     actions = torch.LongTensor(actions).to(device)
     rewards = torch.FloatTensor(rewards).to(device)
     next_states = torch.FloatTensor(next_states).to(device)
-    dones = torch.FloatTensor(dones).to(device)
+    dones = torch.BoolTensor(dones).to(device)
 
-    curr_Q = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
-    next_Q = target_net(next_states)
-    max_next_Q = torch.max(next_Q, 1)[0].squeeze()
-    expected_Q = rewards + (1 - dones) * GAMMA * max_next_Q
+    curr_Q = policy_net(states).gather(1, actions.long().unsqueeze(-1)).squeeze(-1)
+    max_next_Q = target_net(next_states).max(1)[0]
+    max_next_Q[dones] = 0.0
+    max_next_Q = max_next_Q.detach()
+    expected_Q = rewards + GAMMA * max_next_Q
 
     # Compute Huber loss
     loss = F.smooth_l1_loss(curr_Q,
