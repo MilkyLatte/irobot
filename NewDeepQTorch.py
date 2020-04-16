@@ -10,6 +10,8 @@ import cv2
 from collections import deque, namedtuple
 import random
 import time
+import results
+
 
 from wrappers import wrap_deepmind, make_atari
 
@@ -240,6 +242,7 @@ PATH = "./deepQ.pt"
 def train_model(num_frames):
     env = make_atari('PongNoFrameskip-v4')
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
+    train_results = results.results(globals())
 
     cumulative_frames = 0
     best_score = -50
@@ -289,10 +292,13 @@ def train_model(num_frames):
             print("Avg Reward Last 100 games: {}".format(
                 np.mean(rewards[-100:])))
 
+        train_results.record(cumulative_frames, games, EPSILON, cum_reward, full_loss[-1])
+
         if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
             break
 
     torch.save(target_net.state_dict(), PATH)
+    train_results.close()
 
 
 def load_agent():
@@ -328,9 +334,9 @@ def inference(episodes, model, env_name):
 
 
 def main():
-    # train_model(NUMBER_OF_FRAMES)
-    model = load_agent()
-    inference(100, model, 'PongNoFrameskip-v4')
+    train_model(NUMBER_OF_FRAMES)
+    #model = load_agent()
+    #inference(100, model, 'PongNoFrameskip-v4')
 
 if __name__ == '__main__':
     main()
