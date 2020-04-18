@@ -10,11 +10,12 @@ import cv2
 from collections import deque, namedtuple
 import random
 import time
+from guppy import hpy
 
 from wrappers import wrap_deepmind, make_atari
 
 
-e = gym.make('PongNoFrameskip-v4')
+e = gym.make('BreakoutNoFrameskip-v4')
 # env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -146,13 +147,13 @@ TRAIN_FREQUENCY = 4
 HEIGHT = 84
 WIDTH = 84
 EPSILON = 0
-MEM_SIZE = 10000
+MEM_SIZE = 250000
 LEARNING_STARTS = 10000
 
 SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
 
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 0.00001
 
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -206,8 +207,8 @@ def optimize_model(t):
     states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
 
 
-    states = np.array(states).reshape(-1, 4, HEIGHT, WIDTH)
-    next_states = np.array(next_states).reshape(-1, 4, HEIGHT, WIDTH)
+    states = np.array(states)[None].reshape(-1, 4, HEIGHT, WIDTH)
+    next_states = np.array(next_states)[None].reshape(-1, 4, HEIGHT, WIDTH)
 
     states = torch.FloatTensor(states).to(device)
     actions = torch.LongTensor(actions).to(device)
@@ -231,14 +232,25 @@ def optimize_model(t):
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
-    return loss.item()
+
+    # print(h.heap())
+
+    return loss.data
 
 
-PATH = "./deepQ.pt"
+PATH = "./BreakoutDQN.pt"
 
+import sys
+from guppy import hpy
+# h = hpy()
 
+import os
+import psutil
+pid = os.getpid()
+py = psutil.Process(pid)
+import gc
 def train_model(num_frames):
-    env = make_atari('PongNoFrameskip-v4')
+    env = make_atari('BreakoutNoFrameskip-v4')
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
 
     cumulative_frames = 0
@@ -251,20 +263,23 @@ def train_model(num_frames):
         done = False
         cum_reward = 0
         cum_loss = []
-        while not done:
-            action = select_action(torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
+        while 1:
+            action = select_action(torch.tensor(np.array(state)[None].reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
 
-            next_state, reward, done, _ = env.step(action)
+            next_state, reward, done, info = env.step(action)
 
             memory.add(state, action, reward, next_state, reward)
 
             state = next_state
             if cumulative_frames % TRAIN_FREQUENCY == 0 and cumulative_frames > LEARNING_STARTS:
-                loss = optimize_model(cumulative_frames)
-                cum_loss.append(loss)
+                optimize_model(cumulative_frames)
+                # cum_loss.append(loss)
             
             cum_reward += reward
             cumulative_frames += 1
+
+            if info['ale.lives'] == 0:
+                break
         
             if cumulative_frames % TARGET_UPDATE == 0:
                 target_net.load_state_dict(policy_net.state_dict())
@@ -288,9 +303,16 @@ def train_model(num_frames):
                 np.mean(full_loss[-100:])))
             print("Avg Reward Last 100 games: {}".format(
                 np.mean(rewards[-100:])))
+            # memory use in MB...I think
+            memoryUse = py.memory_info()[0] / 2.**20
+            print('iteration {}: memory use: {}MB'.format(cumulative_frames, memoryUse))
 
-        if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
+
+
+        if cumulative_frames >= NUMBER_OF_FRAMES:
             break
+        # if np.mean(rewards[-100:]) >= 21 and cumulative_frames > LEARNING_STARTS:
+        #     break
 
     torch.save(target_net.state_dict(), PATH)
 
@@ -328,9 +350,9 @@ def inference(episodes, model, env_name):
 
 
 def main():
-    # train_model(NUMBER_OF_FRAMES)
-    model = load_agent()
-    inference(100, model, 'PongNoFrameskip-v4')
+    train_model(NUMBER_OF_FRAMES)
+    # model = load_agent()
+    # inference(100, model, 'PongNoFrameskip-v4')
 
 if __name__ == '__main__':
     main()

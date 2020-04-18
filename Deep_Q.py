@@ -101,7 +101,7 @@ class ReplayMemory(object):
 
         # Pre-allocate memory for the states and new_states in a minibatch
         self.states = np.empty((self.batch_size, self.agent_history_length,
-                                self.frame_height, self.frame_width), dtype=np.uint8)
+                                self.frame_height, self.frame_width), dtype=np.uint8)  
         self.new_states = np.empty((self.batch_size, self.agent_history_length,
                                     self.frame_height, self.frame_width), dtype=np.uint8)
         self.indices = np.empty(self.batch_size, dtype=np.int32)
@@ -190,40 +190,28 @@ class Atari(object):
         return torch.tensor(self.state, device=device).unsqueeze(0), new_frame, reward, terminal, terminal_life_lost, info
 
 
-def convert_screen(screen):
-    # This function simplifies the environment as color is not important
-    # the top sides of the screen are also irrelevant as the agent will
-    # get a reward directly from the environment and not by looking at
-    # the score
-    reshaped = cv2.resize(screen, (84, 110), interpolation=cv2.INTER_AREA)
-    cropped = reshaped[20:104]
-
-    gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-
-    # cv2.imshow("cropped", gray)
-    # cv2.waitKey(0)
-    # We reshape as pytorch uses the order of features (CHW)
-    return gray.reshape(1, HEIGHT, WIDTH)
-
-
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
-EPS_END = 0.02
-EPS_DECAY = 30000
-NUMBER_OF_FRAMES = 10000000
+EPS_END = 0.01
+EXP_FRACTION = 0.1
+NUMBER_OF_FRAMES = 1e7
+
 TARGET_UPDATE = 1000
-ANNELING_FRAMES = 1000000
+# ANNELING_FRAMES = 1000000
+
+TRAIN_FREQUENCY = 4
 
 HEIGHT = 84
 WIDTH = 84
 EPSILON = 0
-MEM_SIZE = 40000
-LEARNING_STARTS = 1000
+MEM_SIZE = 200000
+LEARNING_STARTS = 10000
+
+SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
 
-LEARNING_RATE = 5e-4
-
+LEARNING_RATE = 1e-4
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -232,12 +220,15 @@ optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
 memory = ReplayMemory(MEM_SIZE)
 steps_done = 0
 
+
 def get_epsilon(current_step):
-    eps = EPS_END + (EPS_START - EPS_END) * \
-        np.exp(-1 * current_step/ EPS_DECAY)
+    fraction = min(float(current_step) / SCHEDULE_TIMESTEPS, 1.0)
+    eps = EPS_START + fraction * (EPS_END - EPS_START)
     if eps < EPS_END:
         eps = EPS_END
     return eps
+
+
     # rate = (EPS_END-EPS_START)/ANNELING_FRAMES
     # eps_threshold = rate * current_step + EPS_START
     # if eps_threshold < EPS_END:
@@ -277,13 +268,15 @@ def optimize_model():
     actions = torch.LongTensor(actions).to(device)
     rewards = torch.FloatTensor(rewards).to(device)
     next_states = torch.FloatTensor(next_states).to(device)
-    dones = torch.FloatTensor(dones).to(device)
+    dones = torch.BoolTensor(dones).to(device)
 
-    curr_Q = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
-    next_Q = target_net(next_states)
-    max_next_Q = torch.max(next_Q, 1)[0].squeeze()
-    expected_Q = rewards + (1 - dones) * GAMMA * max_next_Q
-    
+    curr_Q = policy_net(states).gather(
+        1, actions.long().unsqueeze(-1)).squeeze(-1)
+    max_next_Q = target_net(next_states).max(1)[0]
+    max_next_Q[dones] = 0.0
+    max_next_Q = max_next_Q.detach()
+    expected_Q = rewards + GAMMA * max_next_Q
+
     # Compute Huber loss
     loss = F.smooth_l1_loss(curr_Q,
                             expected_Q)
@@ -296,7 +289,7 @@ def optimize_model():
     optimizer.step()
     return loss.item()
 
-PATH = "./deepQ.pt"
+PATH = "./deepQ1.pt"
 
 def train_model(num_frames):
     env = Atari('PongNoFrameskip-v4')
@@ -321,13 +314,14 @@ def train_model(num_frames):
 
             state = next_state
             memory_state = memory_next_state
-            # if cumulative_frames % UPDATE_FREQ == 0 and cumulative_frames > LEARNING_STARTS:
-            loss = optimize_model()
-            cum_loss.append(loss)
+            if cumulative_frames % TRAIN_FREQUENCY == 0 and cumulative_frames > LEARNING_STARTS:
+                loss = optimize_model()
+                cum_loss.append(loss)
+
             cum_reward += reward
             cumulative_frames += 1
+
             if cumulative_frames % TARGET_UPDATE == 0:
-                print("HERE")
                 target_net.load_state_dict(policy_net.state_dict())
         
         if best_score < cum_reward:
