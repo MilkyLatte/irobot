@@ -1,0 +1,22 @@
+Train started: 17:56
+F = <module 'torch.nn.functional' from '/home/milkylatte/miniconda3/envs/irobot/lib/python3.8/site-packages/torch/nn/functional.py'>
+BATCH_SIZE = 32
+GAMMA = 0.99
+EPS_START = 1
+EPS_END = 0.01
+EXP_FRACTION = 0.1
+NUMBER_OF_FRAMES = 10000000.0
+TARGET_UPDATE = 1000
+TRAIN_FREQUENCY = 4
+HEIGHT = 84
+WIDTH = 84
+EPSILON = 0
+MEM_SIZE = 10000
+LEARNING_STARTS = 10000
+SINGLE_EVAL_STEPS = 10000
+SCHEDULE_TIMESTEPS = 1000000.0
+LEARNING_RATE = 0.0001
+PATH = ./deepQ.pt
+GIF_PATH = ./game_video/
+
+games,frames,epsilon,score,network_loss,delta_t,frames/t

@@ -4,7 +4,6 @@ import torch.nn.functional as F
 
 import gym
 import numpy as np
-import matplotlib.pyplot as plt
 import math
 import cv2
 from collections import deque, namedtuple
@@ -278,9 +277,9 @@ def train_model(num_frames):
             full_loss.append(np.mean(cum_loss))
         rewards.append(cum_reward)
         games += 1
-        
         # Single Game Evaluation for GIF 
-        if games % 1000 == 0:        
+        if games % 1000 == 0:    
+            print("Evaluating for gif")    
             terminal = False
             frames_for_gif = []
             eval_rewards = []
@@ -288,10 +287,11 @@ def train_model(num_frames):
 
             #playing one game
             while not terminal:
+                real_frame = env.render(mode='rgb_array')
                 episode_reward_sum = 0
                 single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
                 new_frame, reward, terminal, _ = env.step(single_action)
-                frames_for_gif.append(new_frame)
+                frames_for_gif.append(real_frame)
                 frame = new_frame
                 episode_reward_sum += reward
                 if terminal:
@@ -301,7 +301,7 @@ def train_model(num_frames):
             except IndexError:
                     print("No evaluation game finished")
 
-
+      
         # Printing Game Progress
         if games % 1000 == 0:
             print("=============================================")
@@ -319,7 +319,7 @@ def train_model(num_frames):
         if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
             break
 
-    torch.save(target_net.state_dict(), PATH)
+    # torch.save(target_net.state_dict(), PATH)
     train_results.close()
 
 
