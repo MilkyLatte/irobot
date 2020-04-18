@@ -2,9 +2,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-
 import gym
 import numpy as np
+import matplotlib.pyplot as plt
 import math
 import cv2
 from collections import deque, namedtuple
@@ -12,6 +12,9 @@ import random
 import time
 import results
 
+#for GIF generation
+import imageio
+from skimage.transform import resize
 
 from wrappers import wrap_deepmind, make_atari
 
@@ -42,7 +45,30 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # }
 
 n_actions = e.action_space.n
+BATCH_SIZE = 32
+GAMMA = 0.99
+EPS_START = 1
+EPS_END = 0.01
+EXP_FRACTION = 0.1
+NUMBER_OF_FRAMES = 1e7
 
+TARGET_UPDATE = 1000
+# ANNELING_FRAMES = 1000000
+
+TRAIN_FREQUENCY = 4
+
+HEIGHT = 84
+WIDTH = 84
+EPSILON = 0
+MEM_SIZE = 10000
+LEARNING_STARTS = 10000
+SINGLE_EVAL_STEPS = 10_000
+
+SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
+
+LEARNING_RATE = 1e-4
+PATH = "./deepQ.pt"
+GIF_PATH = './game_video/'
 
 class DeepQNet(nn.Module):
     def __init__(self, h, w):
@@ -133,29 +159,6 @@ class ReplayBuffer(object):
                  for _ in range(batch_size)]
         return self._encode_sample(idxes)
 
-BATCH_SIZE = 32
-GAMMA = 0.99
-EPS_START = 1
-EPS_END = 0.01
-EXP_FRACTION = 0.1
-NUMBER_OF_FRAMES = 1e7
-
-TARGET_UPDATE = 1000
-# ANNELING_FRAMES = 1000000
-
-TRAIN_FREQUENCY = 4
-
-HEIGHT = 84
-WIDTH = 84
-EPSILON = 0
-MEM_SIZE = 10000
-LEARNING_STARTS = 10000
-
-SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
-
-
-LEARNING_RATE = 1e-4
-
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -171,8 +174,6 @@ def get_epsilon(current_step):
     if eps < EPS_END:
         eps = EPS_END
     return eps
-
-
     # rate = (EPS_END-EPS_START)/ANNELING_FRAMES
     # eps_threshold = rate * current_step + EPS_START
     # if eps_threshold < EPS_END:
@@ -236,9 +237,6 @@ def optimize_model(t):
     return loss.item()
 
 
-PATH = "./deepQ.pt"
-
-
 def train_model(num_frames):
     env = make_atari('PongNoFrameskip-v4')
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
@@ -265,7 +263,7 @@ def train_model(num_frames):
             if cumulative_frames % TRAIN_FREQUENCY == 0 and cumulative_frames > LEARNING_STARTS:
                 loss = optimize_model(cumulative_frames)
                 cum_loss.append(loss)
-            
+                        
             cum_reward += reward
             cumulative_frames += 1
         
@@ -280,8 +278,32 @@ def train_model(num_frames):
             full_loss.append(np.mean(cum_loss))
         rewards.append(cum_reward)
         games += 1
+        
+        # Single Game Evaluation for GIF 
+        if games % 1000 == 0:        
+            terminal = False
+            frames_for_gif = []
+            eval_rewards = []
+            frame = env.reset()
 
-        if games % 10 == 0:
+            #playing one game
+            while not terminal:
+                episode_reward_sum = 0
+                single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
+                new_frame, reward, terminal, _ = env.step(single_action)
+                frames_for_gif.append(new_frame)
+                frame = new_frame
+                episode_reward_sum += reward
+                if terminal:
+                    eval_rewards.append(episode_reward_sum)    
+            try:
+                    generate_gif(cumulative_frames, frames_for_gif, eval_rewards[0], PATH)
+            except IndexError:
+                    print("No evaluation game finished")
+
+
+        # Printing Game Progress
+        if games % 1000 == 0:
             print("=============================================")
             print("Game: {} | Frame {}".format(games, cumulative_frames))
             print("Final reward: {}".format(cum_reward))
@@ -318,7 +340,7 @@ def eval_action(state, model):
 
 def inference(episodes, model, env_name):
     env = make_atari(env_name)
-    env = wrap_deepmind(env, episode_life=True, frame_stack=True)
+    env = wrap_deepmind(env, episode_life=True, frame_stack=True)  
     for _ in range(episodes):
         observation = env.reset()
         done = False
@@ -333,13 +355,23 @@ def inference(episodes, model, env_name):
                     print(reward)
 
 
+def generate_gif(current_frame, frames_for_gif, reward, path):
+    #takes current, and generates and saves a GIF to PATH for input frames
+    #for i, frame_i in enumerate(frames_for_gif): 
+    #    frame = np.array(frame_i)[None]
+    #    frames_for_gif[i] = resize(frame, (420, 320,3), 
+    #                                 ).astype(np.uint8)      
+    imageio.mimsave(f'{GIF_PATH}{"ATARI_frame_{0}_reward_{1}.gif".format(current_frame, reward)}',
+                        frames_for_gif, duration=1/30)
+
 def main():
     train_model(NUMBER_OF_FRAMES)
     #model = load_agent()
-    #inference(100, model, 'PongNoFrameskip-v4')
+    #inference(1, model, 'PongNoFrameskip-v4')
 
 if __name__ == '__main__':
     main()
+
 
 
 
