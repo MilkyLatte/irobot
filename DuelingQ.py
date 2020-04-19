@@ -1,3 +1,7 @@
+import gc
+import psutil
+import os
+import sys
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -58,17 +62,33 @@ class DeepQNet(nn.Module):
         convh = conv2d_size_out(conv2d_size_out(
             conv2d_size_out(h, 8, 4), 4, 2), 3, 1)
 
+
         linear_input = convh * convw * 64
-        self.fc1 = nn.Linear(linear_input, 512)
-        self.out = nn.Linear(512, n_actions)
+        self.value = nn.Sequential(
+            nn.Linear(linear_input, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        )
+
+        self.advantage = nn.Sequential(
+            nn.Linear(linear_input, 512),
+            nn.ReLU(),
+            nn.Linear(512, n_actions)
+        )
+
+
     def forward(self, x):
         x = F.relu(self.conv1(x.float()))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
+        
+        x = x.view(x.size(0), -1)
 
-        x = F.relu(self.fc1(x.view(x.size(0), -1)))
-        x = self.out(x)
-        return x
+        values = self.value(x)
+        advantages = self.advantage(x)
+
+        q_values = values + (advantages - advantages.mean(1).unsqueeze(1))
+        return q_values
 
 
 class ReplayBuffer(object):
@@ -132,6 +152,7 @@ class ReplayBuffer(object):
                  for _ in range(batch_size)]
         return self._encode_sample(idxes)
 
+
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
@@ -165,12 +186,11 @@ steps_done = 0
 
 
 def get_epsilon(current_step):
-    fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
+    fraction = min(float(current_step) / SCHEDULE_TIMESTEPS, 1.0)
     eps = EPS_START + fraction * (EPS_END - EPS_START)
     if eps < EPS_END:
         eps = EPS_END
     return eps
-
 
     # rate = (EPS_END-EPS_START)/ANNELING_FRAMES
     # eps_threshold = rate * current_step + EPS_START
@@ -206,7 +226,6 @@ def optimize_model(t):
 
     states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
 
-
     states = np.array(states)[None].reshape(-1, 4, HEIGHT, WIDTH)
     next_states = np.array(next_states)[None].reshape(-1, 4, HEIGHT, WIDTH)
 
@@ -216,7 +235,8 @@ def optimize_model(t):
     next_states = torch.FloatTensor(next_states).to(device)
     dones = torch.BoolTensor(dones).to(device)
 
-    curr_Q = policy_net(states).gather(1, actions.long().unsqueeze(-1)).squeeze(-1)
+    curr_Q = policy_net(states).gather(
+        1, actions.long().unsqueeze(-1)).squeeze(-1)
     max_next_Q = target_net(next_states).max(1)[0]
     max_next_Q[dones] = 0.0
     max_next_Q = max_next_Q.detach()
@@ -238,20 +258,17 @@ def optimize_model(t):
     return loss.data
 
 
-PATH = "./BreakoutDQN.pt"
+PATH = "./DuelingBreakoutDQN.pt"
 
-import sys
-from guppy import hpy
 # h = hpy()
 
-import os
-import psutil
 pid = os.getpid()
 py = psutil.Process(pid)
-import gc
+
+
 def train_model(num_frames):
     env = make_atari('BreakoutNoFrameskip-v4')
-    env = wrap_deepmind(env,episode_life=True, frame_stack=True)
+    env = wrap_deepmind(env, episode_life=True, frame_stack=True)
 
     cumulative_frames = 0
     best_score = -50
@@ -264,7 +281,8 @@ def train_model(num_frames):
         cum_reward = 0
         cum_loss = []
         while 1:
-            action = select_action(torch.tensor(np.array(state)[None].reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
+            action = select_action(torch.tensor(np.array(
+                state)[None].reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
 
             next_state, reward, done, info = env.step(action)
 
@@ -272,15 +290,15 @@ def train_model(num_frames):
 
             state = next_state
             if cumulative_frames % TRAIN_FREQUENCY == 0 and cumulative_frames > LEARNING_STARTS:
-                optimize_model(cumulative_frames)
-                # cum_loss.append(loss)
-            
+                optimize_model(cumulative_frames).detach()
+                # cum_loss.append(float(l))
+
             cum_reward += reward
             cumulative_frames += 1
 
             if info['ale.lives'] == 0:
                 break
-        
+
             if cumulative_frames % TARGET_UPDATE == 0:
                 target_net.load_state_dict(policy_net.state_dict())
 
@@ -305,8 +323,8 @@ def train_model(num_frames):
                 np.mean(rewards[-100:])))
             # memory use in MB...I think
             memoryUse = py.memory_info()[0] / 2.**20
-            print('iteration {}: memory use: {}MB'.format(cumulative_frames, memoryUse))
-
+            print('iteration {}: memory use: {}MB'.format(
+                cumulative_frames, memoryUse))
 
 
         if cumulative_frames >= NUMBER_OF_FRAMES:
@@ -323,6 +341,7 @@ def load_agent():
     model.eval()
     return model
 
+
 def eval_action(state, model):
     r = np.random.rand()
     if r > EPS_END:
@@ -331,6 +350,7 @@ def eval_action(state, model):
             return model(state).max(1)[1].item()
     else:
         return np.random.randint(0, n_actions)
+
 
 def inference(episodes, model, env_name):
     env = make_atari(env_name)
@@ -341,7 +361,8 @@ def inference(episodes, model, env_name):
         while not done:
             time.sleep(0.05)
             env.render()
-            observation = torch.tensor(np.array(observation).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
+            observation = torch.tensor(
+                np.array(observation).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
             with torch.no_grad():
                 action = model(observation).max(1)[1].item()
                 observation, reward, done, _ = env.step(action)
@@ -350,13 +371,13 @@ def inference(episodes, model, env_name):
 
 
 def main():
-    # train_model(NUMBER_OF_FRAMES)
+    train_model(NUMBER_OF_FRAMES)
     # model = load_agent()
     # inference(100, model, 'BreakoutNoFrameskip-v4')
 
+
 if __name__ == '__main__':
     main()
-
 
 
 # for i_episode in range(100):
