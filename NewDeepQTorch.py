@@ -278,7 +278,7 @@ def train_model(num_frames):
         rewards.append(cum_reward)
         games += 1
         # Single Game Evaluation for GIF 
-        if games % 1 == 0:    
+        if games % 1000 == 0:    
             print("Evaluating for gif")    
             terminal = False
             real_frames_for_gif = []
@@ -306,7 +306,7 @@ def train_model(num_frames):
                     print("No evaluation game finished")
 
         # Printing Game Progress
-        if games % 1000 == 0:
+        if games % 10 == 0:
             print("=============================================")
             print("Game: {} | Frame {}".format(games, cumulative_frames))
             print("Final reward: {}".format(cum_reward))
