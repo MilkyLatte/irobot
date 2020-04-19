@@ -278,30 +278,33 @@ def train_model(num_frames):
         rewards.append(cum_reward)
         games += 1
         # Single Game Evaluation for GIF 
-        if games % 1000 == 0:    
+        if games % 1 == 0:    
             print("Evaluating for gif")    
             terminal = False
+            real_frames_for_gif = []
             frames_for_gif = []
             eval_rewards = []
             frame = env.reset()
 
             #playing one game
             while not terminal:
-                real_frame = env.render(mode='rgb_array')
                 episode_reward_sum = 0
                 single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
                 new_frame, reward, terminal, _ = env.step(single_action)
-                frames_for_gif.append(real_frame)
+
+                real_frame = env.render(mode='rgb_array')                
+                real_frames_for_gif.append(real_frame)
+                frames_for_gif.append(new_frame)
                 frame = new_frame
                 episode_reward_sum += reward
                 if terminal:
                     eval_rewards.append(episode_reward_sum)    
             try:
-                    generate_gif(cumulative_frames, frames_for_gif, eval_rewards[0], PATH)
+                    generate_gif(cumulative_frames, real_frames_for_gif, eval_rewards[0], PATH)
+                    generate_gif(cumulative_frames+1, frames_for_gif, eval_rewards[0], PATH)
             except IndexError:
                     print("No evaluation game finished")
 
-      
         # Printing Game Progress
         if games % 1000 == 0:
             print("=============================================")
