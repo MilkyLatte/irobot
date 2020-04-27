@@ -45,7 +45,7 @@ class DeepQNet(nn.Module):
         return x
 
 
-class ReplayBuffer(object):
+class Prio_ReplayBuffer(object):
     def __init__(self, size):
         """Create Replay buffer.
         Parameters
@@ -57,27 +57,31 @@ class ReplayBuffer(object):
         self._storage = []
         self._maxsize = size
         self._next_idx = 0
+        self.priorities = []
 
     def __len__(self):
         return len(self._storage)
 
     def add(self, obs_t, action, reward, obs_tp1, done):
         data = (obs_t, action, reward, obs_tp1, done)
+        prio = max(self.priorities, default = 1)
 
         if self._next_idx >= len(self._storage):
             self._storage.append(data)
+            self.priorities.append(prio)
         else:
             self._storage[self._next_idx] = data
+            self.priorities[self._next_idx] = prio
+
         self._next_idx = (self._next_idx + 1) % self._maxsize
 
     def get_probabilities(self, priority_scale):
-        trim_priorities = self.priorities[self.agent_history_length-1:self.current+3]
-        scaled_priorities = np.array(trim_priorities) ** priority_scale
+        scaled_priorities = np.array(self.priorities) ** priority_scale
         sample_probabilities = scaled_priorities / np.sum(scaled_priorities)
         return sample_probabilities
 
     def get_importance(self, probabilities):
-        importance = np.array(1/(self.size) * 1/probabilities)
+        importance = np.array(1/(self._maxsize) * 1/probabilities)
         importance_normalized = np.array(importance / max(importance))
         return importance_normalized
 
@@ -94,32 +98,22 @@ class ReplayBuffer(object):
         return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
     def sample(self, batch_size):
-        """Sample a batch of experiences.
-        Parameters
-        ----------
-        batch_size: int
-            How many transitions to sample.
-        Returns
-        -------
-        obs_batch: np.array
-            batch of observations
-        act_batch: np.array
-            batch of actions executed given obs_batch
-        rew_batch: np.array
-            rewards received as results of executing act_batch
-        next_obs_batch: np.array
-            next set of observations seen after executing act_batch
-        done_mask: np.array
-            done_mask[i] = 1 if executing act_batch[i] resulted in
-            the end of an episode and 0 otherwise.
-        """
-        idxes = [random.randint(0, len(self._storage) - 1)
-                 for _ in range(batch_size)]
-        return self._encode_sample(idxes)
+        #idxes = [random.randint(0, len(self._storage) - 1)
+        #         for _ in range(batch_size)]
 
-    def set_priorities(self, indices, errors, offset=0.1):
+        #sampling with the priorities
+        sample_probabilities = self.get_probabilities(PRIO_SCALE)
+
+        idxes = np.random.choice(range(len(self._storage)), batch_size,p = sample_probabilities, replace = False)
+
+        #define the importance to pass through for normalising the learning steps
+        importance = self.get_importance(sample_probabilities[idxes])
+
+        return self._encode_sample(idxes), importance, idxes
+
+    def set_priorities(self, indices, errors, offset=0.001):
         for i,e in zip(indices, errors):
-            self.priorities[i] = abs(e) + offset
+            self.priorities[i] = e.item() + offset
 
 
 ##### Epsilon Linear Decay Function ####
@@ -132,7 +126,7 @@ def get_epsilon(current_step):
 
 ##### Beta Linear Increase Function ####
 def get_beta(current_step):
-fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
+    fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
     beta = BETA_START + fraction * (BETA_END - BETA_START)
     if beta < BETA_END:
         beta = BETA_END
@@ -164,8 +158,8 @@ def optimize_model(t):
     if t < LEARNING_STARTS:
         return 0
 
-    states, actions, rewards, next_states, dones = memory.sample(BATCH_SIZE)
-
+    (states, actions, rewards, next_states, dones), importance, idxes = memory.sample(BATCH_SIZE)
+    
     states = np.array(states).reshape(-1, 4, HEIGHT, WIDTH)
     next_states = np.array(next_states).reshape(-1, 4, HEIGHT, WIDTH)
 
@@ -181,15 +175,24 @@ def optimize_model(t):
     max_next_Q = max_next_Q.detach()
     expected_Q = rewards + GAMMA * max_next_Q
     
-    errors =  curr_Q - curr_Q
+    importance_t = torch.FloatTensor(importance ** get_beta(t- LEARNING_STARTS)).to(device)
+
+    # |curr_Q - expected_Q|
+    error =  torch.abs(curr_Q - expected_Q)
+    memory.set_priorities(idxes, error)
+    
     # Compute Huber loss for error
-    if torch.abs(error) < DELTA:
-        loss = torch.square(error) * 0.5
-    else:
-        loss = DELTA * (torch.abs(error) - 0.5 * DELTA)
+    #if error < DELTA:
+    #    loss = error**2 * 0.5
+    #else:
+    #    loss = DELTA * (error - 0.5)
+
+    # Huber loss
+    #error_d = torch.cmin(error,DELTA)
+    #loss = torch.cmul(error, error:mul(2):add(- error_d)):mul(0.5):mean()
 
     # Weighing loss by importance values
-    loss = torch.mean(torch.mul(errors**2, importance_v ** (1-EPSILON)))
+    loss = torch.mean( (error**2) * importance_t)
 
     # Optimize the model
     optimizer.zero_grad()
@@ -197,13 +200,13 @@ def optimize_model(t):
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
-    return loss.item(), indices, errors
+    return loss.item()
 
 
 def train_model(num_frames):
     env = make_atari('PongNoFrameskip-v4')
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
-    train_results = results.results(globals())
+    train_results = results.results( globals())
 
     cumulative_frames = 0
     best_score = -50
@@ -224,10 +227,7 @@ def train_model(num_frames):
 
             state = next_state
             if cumulative_frames % TRAIN_FREQUENCY == 0 and cumulative_frames > LEARNING_STARTS:
-                loss, indices, errors = optimize_model(cumulative_frames)
-                
-                #set the priority values in the memory
-                memory.set_priorities(indices, errors)
+                loss = optimize_model(cumulative_frames)
                 cum_loss.append(loss)
                         
             cum_reward += reward
@@ -245,7 +245,7 @@ def train_model(num_frames):
         rewards.append(cum_reward)
         games += 1
         # Single Game Evaluation for GIF 
-        if games % 1 == 0:    
+        if games % 500 == 0:    
             print("Evaluating for gif")    
             terminal = False
             real_frames_for_gif = []
@@ -339,6 +339,8 @@ e = gym.make('PongNoFrameskip-v4')
 # env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_actions = e.action_space.n
+
+PRIO_SCALE = 1
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
@@ -370,7 +372,7 @@ policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
 
 optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
-memory = ReplayBuffer(MEM_SIZE)
+memory = Prio_ReplayBuffer(MEM_SIZE)
 steps_done = 0
 
 
