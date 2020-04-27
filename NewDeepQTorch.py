@@ -328,7 +328,7 @@ def train_model(num_frames):
             train_results.save_single_game(games, data)
         
         # termination criteria
-        if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
+        if np.mean(rewards[-100:]) >= ENV_TERM_SCORE and cumulative_frames > LEARNING_STARTS:
             break
 
     # torch.save(target_net.state_dict(), PATH)
