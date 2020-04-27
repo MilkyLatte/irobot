@@ -2,21 +2,24 @@ from datetime import datetime
 import os
 import torch
 import pickle
-# import zlib
+import zlib
+import gym
+import numpy as np
+import imageio
 
 class results():
-    def __init__(self, global_vars_dict : dict, folder='logs'):
+    def __init__(self, global_vars_dict : dict, folder):
         super().__init__()
-        # create a log file in the log directory
         self.time_start = datetime.now()
-        self.log_file_name = 'results_' + self.time_start.strftime('%Y%m%d_%H%M') + ".log"
-        self.log_file_path = os.path.join(folder, self.log_file_name)
-        if not os.path.exists(os.path.dirname(self.log_file_path)):
-            os.makedirs(os.path.dirname(self.log_file_path))
+        # create the results directory
+        self.folder = folder
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        self.log_file_name = os.path.join(folder, 'log.txt')
 
         # write a brief descriptor 
-        with open(self.log_file_path, mode='w') as f:
-            f.write('Train started: ' + self.time_start.strftime('%H:%M') + '\n')
+        with open(self.log_file_name, mode='w') as f:
+            f.write('Train started: ' + self.time_start.strftime('%Y%m%d_%H%M') + '\n')
             f.writelines(f'{k} = {v}\n' for k, v in global_vars_dict.items() if k==k.upper())
             f.write('\ngames,frames,epsilon,score,network_loss,delta_t,frames/t\n')
 
@@ -34,25 +37,38 @@ class results():
             self.last_t = t
             self.last_frames = frames
             # self.best_score = max(score, self.best_score)
-            with open(self.log_file_path, mode='a') as f:
+            with open(self.log_file_name, mode='a') as f:
                 f.write(t.strftime('%H:%M:%S') + f',{games},{frames},{epsilon},{score},{network_loss},{delta_t},{frames_per_sec}\n')
             self.records.append((t, games, frames, epsilon, score, network_loss, delta_t, frames_per_sec))
-            if (len(self.records)%5==0):
+            if len(self.records)%5==0:
                 self.save_results()
             print(f'record count {len(self.records)} frames/sec {frames_per_sec}')
         except Exception as err:
             print(f'Error recording results {err}')
 
-    def save_model(self, frame_idx, q_network):
+    def save_model(self, episode_idx, q_network):
         # periodic save of model into same directory
         try:
-            file_name = self.log_file_path.replace('.log', f'_torch_{frame_idx}.pyt')
+            file_name = os.path.join(self.folder, f'torch_model_episode_{episode_idx}.pyt')
             torch.save(q_network.state_dict(), file_name)
+
+            # play a single game and save a gif too
         except Exception as err:
             print(f'Error saving model {err}')
 
+    def save_single_game(self, episode_idx, data):
+        # data = tuples of (frame_idx, max_q, action, reward, rgb_frame)
+        file_name = os.path.join(self.folder, f'single_game_data_{episode_idx}.zpkl')
+        tmp = pickle.dumps(data)
+        ztmp = zlib.compress(tmp)
+        with open(file_name, 'wb') as f:
+            f.write(ztmp)
+        # generate a gif and save that too:
+        file_name = os.path.join(self.folder, f'gif_video_{episode_idx}.gif')
+        imageio.mimsave(file_name, [x[4] for x in data], fps=60)
+
     def save_results(self):
-        file_name = self.log_file_path.replace('.log', '.pkl')
+        file_name = os.path.join(self.folder, 'records.pkl')
         with open(file_name, 'wb') as f:
             pickle.dump(self.records, f)
 
