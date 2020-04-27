@@ -128,7 +128,7 @@ def get_epsilon(current_step):
 def get_beta(current_step):
     fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
     beta = BETA_START + fraction * (BETA_END - BETA_START)
-    if beta < BETA_END:
+    if beta > BETA_END:
         beta = BETA_END
     return beta
 
@@ -175,24 +175,20 @@ def optimize_model(t):
     max_next_Q = max_next_Q.detach()
     expected_Q = rewards + GAMMA * max_next_Q
     
-    importance_t = torch.FloatTensor(importance ** get_beta(t- LEARNING_STARTS)).to(device)
+    #setting the importance values
+    importance_t = torch.FloatTensor(importance ** get_beta(t)).to(device)
 
     # |curr_Q - expected_Q|
     error =  torch.abs(curr_Q - expected_Q)
-    memory.set_priorities(idxes, error)
+
+    # computing errors for the huber loss
+    error_h = torch.where(error < DELTA, 0.5 * error ** 2, DELTA * (error - 0.5 * DELTA))
+   
+    # setting the priorties as this huber loss
+    memory.set_priorities(idxes, error_h)
     
-    # Compute Huber loss for error
-    #if error < DELTA:
-    #    loss = error**2 * 0.5
-    #else:
-    #    loss = DELTA * (error - 0.5)
-
-    # Huber loss
-    #error_d = torch.cmin(error,DELTA)
-    #loss = torch.cmul(error, error:mul(2):add(- error_d)):mul(0.5):mean()
-
-    # Weighing loss by importance values
-    loss = torch.mean( (error**2) * importance_t)
+    # reducing the huber loss with the mean and scaled importance
+    loss = torch.mean(importance_t * error_h)
 
     # Optimize the model
     optimizer.zero_grad()
