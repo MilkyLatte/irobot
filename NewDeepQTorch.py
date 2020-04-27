@@ -17,8 +17,9 @@ from skimage.transform import resize
 
 from wrappers import wrap_deepmind, make_atari
 
+ENV_NAME = 'PongNoFrameskip-v4'
 
-e = gym.make('PongNoFrameskip-v4')
+e = gym.make(ENV_NAME)
 # env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -68,6 +69,8 @@ SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 LEARNING_RATE = 1e-4
 PATH = "./deepQ.pt"
 GIF_PATH = './game_video/'
+
+
 
 class DeepQNet(nn.Module):
     def __init__(self, h, w):
@@ -237,9 +240,10 @@ def optimize_model(t):
 
 
 def train_model(num_frames):
-    env = make_atari('PongNoFrameskip-v4')
+    env = make_atari(ENV_NAME)
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
-    train_results = results.results(globals())
+    dtm = time.strftime('%Y%m%d_%H%M')
+    train_results = results.results(globals(), f'DDQN_{ENV_NAME}_{dtm}')
 
     cumulative_frames = 0
     best_score = -50
@@ -277,33 +281,33 @@ def train_model(num_frames):
             full_loss.append(np.mean(cum_loss))
         rewards.append(cum_reward)
         games += 1
-        # Single Game Evaluation for GIF 
-        if games % 1000 == 0:    
-            print("Evaluating for gif")    
-            terminal = False
-            real_frames_for_gif = []
-            frames_for_gif = []
-            eval_rewards = []
-            frame = env.reset()
+        # # Single Game Evaluation for GIF 
+        # if games % 1000 == 0:    
+        #     print("Evaluating for gif")    
+        #     terminal = False
+        #     real_frames_for_gif = []
+        #     frames_for_gif = []
+        #     eval_rewards = []
+        #     frame = env.reset()
 
-            #playing one game
-            while not terminal:
-                episode_reward_sum = 0
-                single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
-                new_frame, reward, terminal, _ = env.step(single_action)
+        #     #playing one game
+        #     while not terminal:
+        #         episode_reward_sum = 0
+        #         single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
+        #         new_frame, reward, terminal, _ = env.step(single_action)
 
-                real_frame = env.render(mode='rgb_array')                
-                real_frames_for_gif.append(real_frame)
-                frames_for_gif.append(new_frame)
-                frame = new_frame
-                episode_reward_sum += reward
-                if terminal:
-                    eval_rewards.append(episode_reward_sum)    
-            try:
-                    generate_gif(cumulative_frames, real_frames_for_gif, eval_rewards[0], PATH)
-                    generate_gif(cumulative_frames+1, frames_for_gif, eval_rewards[0], PATH)
-            except IndexError:
-                    print("No evaluation game finished")
+        #         real_frame = env.render(mode='rgb_array')                
+        #         real_frames_for_gif.append(real_frame)
+        #         frames_for_gif.append(new_frame)
+        #         frame = new_frame
+        #         episode_reward_sum += reward
+        #         if terminal:
+        #             eval_rewards.append(episode_reward_sum)    
+        #     try:
+        #             generate_gif(cumulative_frames, real_frames_for_gif, eval_rewards[0], PATH)
+        #             generate_gif(cumulative_frames+1, frames_for_gif, eval_rewards[0], PATH)
+        #     except IndexError:
+        #             print("No evaluation game finished")
 
         # Printing Game Progress
         if games % 10 == 0:
@@ -318,7 +322,12 @@ def train_model(num_frames):
                 np.mean(rewards[-100:])))
 
         train_results.record(cumulative_frames, games, EPSILON, cum_reward, full_loss[-1])
-
+        if games==1 or games%100==0:
+            train_results.save_model(games, policy_net)
+            data = play_single_game(policy_net, env)
+            train_results.save_single_game(games, data)
+        
+        # termination criteria
         if np.mean(rewards[-100:]) >= 18 and cumulative_frames > LEARNING_STARTS:
             break
 
@@ -358,6 +367,33 @@ def inference(episodes, model, env_name):
                     print(reward)
 
 
+def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False):
+    '''play a single game using greedy policy and populate a data structure with tuples of 
+    (frame_idx, max_q, action, reward, rgb_frame)'''
+    state = env.reset()
+    done = False
+    frames = []
+    data = []
+    frame_idx=0
+    reward = 0
+    max_q = 0
+    action = 0
+
+    while not done:
+        if (display):
+            env.render()
+        frame = env.render(mode='rgb_array')
+        state = torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
+        with torch.no_grad():
+            q_vals = q_network(state)
+            action = q_vals.max(1)[1].item()
+            max_q_val = q_vals.max(1)[0].item()
+            data.append((frame_idx, max_q_val, action, reward, frame))
+            state, reward, done, _ = env.step(action)
+        frame_idx +=1
+    
+    return data
+
 def generate_gif(current_frame, frames_for_gif, reward, path):
     #takes current, and generates and saves a GIF to PATH for input frames
     #for i, frame_i in enumerate(frames_for_gif): 
@@ -369,8 +405,11 @@ def generate_gif(current_frame, frames_for_gif, reward, path):
 
 def main():
     train_model(NUMBER_OF_FRAMES)
-    #model = load_agent()
-    #inference(1, model, 'PongNoFrameskip-v4')
+    # model = load_agent()
+    #inference(1, model, ENV_NAME)
+    # env = make_atari(ENV_NAME)
+    # env = wrap_deepmind(env, episode_life=True, frame_stack=True)  
+    # data = play_single_game(model, env)
 
 if __name__ == '__main__':
     main()
