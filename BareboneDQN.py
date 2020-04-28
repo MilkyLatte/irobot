@@ -241,7 +241,7 @@ def train_model(num_frames):
     env = make_atari(ENV_NAME)
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
     dtm = time.strftime('%Y%m%d_%H%M')
-    train_results = results.results(globals(), f'DDQN_{ENV_NAME}_{dtm}')
+    train_results = results.results(globals(), f'DQN_{ENV_NAME}_{dtm}')
 
     cumulative_frames = 0
     best_score = -50
