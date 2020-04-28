@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+
 import gym
 import numpy as np
 import math
@@ -10,9 +11,40 @@ import random
 import time
 import results
 
-# from skimage.transform import resize
+#for GIF generation
+import imageio
+from skimage.transform import resize
 
 from wrappers import wrap_deepmind, make_atari
+
+ENV_NAME = 'PongNoFrameskip-v4'
+
+e = gym.make(ENV_NAME)
+# env = gym.make('BeamRider-v0')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ACTION_MEANING = {
+#     0: "NOOP",
+#     1: "FIRE",
+#     2: "UP",
+#     3: "RIGHT",
+#     4: "LEFT",
+#     5: "DOWN",
+#     6: "UPRIGHT",
+#     7: "UPLEFT",
+#     8: "DOWNRIGHT",
+#     9: "DOWNLEFT",
+#     10: "UPFIRE",
+#     11: "RIGHTFIRE",
+#     12: "LEFTFIRE",
+#     13: "DOWNFIRE",
+#     14: "UPRIGHTFIRE",
+#     15: "UPLEFTFIRE",
+#     16: "DOWNRIGHTFIRE",
+#     17: "DOWNLEFTFIRE",
+# }
+
+
 
 
 class DeepQNet(nn.Module):
@@ -45,7 +77,7 @@ class DeepQNet(nn.Module):
 
 class Prio_ReplayBuffer(object):
     def __init__(self, size):
-        """Create Replay buffer.
+        """Create Priority Replay buffer.
         Parameters
         ----------
         size: int
@@ -79,8 +111,8 @@ class Prio_ReplayBuffer(object):
         return sample_probabilities
 
     def get_importance(self, probabilities):
-        importance = np.array(1/(self._maxsize) * 1/probabilities)
-        importance_normalized = np.array(importance / max(importance))
+        importance = 1/(self._maxsize) * 1/probabilities
+        importance_normalized = importance / max(importance)
         return importance_normalized
 
     def _encode_sample(self, idxes):
@@ -102,16 +134,19 @@ class Prio_ReplayBuffer(object):
         #sampling with the priorities
         sample_probabilities = self.get_probabilities(PRIO_SCALE)
 
-        idxes = np.random.choice(range(len(self._storage)), batch_size,p = sample_probabilities, replace = False)
+        idxes = random.choices(len(self._storage), k = batch_size, weights = sample_probabilities)
+        #idxes = np.random.choice(range(len(self._storage)), batch_size,p = sample_probabilities)
 
         #define the importance to pass through for normalising the learning steps
         importance = self.get_importance(sample_probabilities[idxes])
 
         return self._encode_sample(idxes), importance, idxes
 
-    def set_priorities(self, indices, errors, offset=0.001):
+    def set_priorities(self, indices, errors, offset=1e-6):
         for i,e in zip(indices, errors):
             self.priorities[i] = e.item() + offset
+
+
 
 
 ##### Epsilon Linear Decay Function ####
@@ -125,12 +160,9 @@ def get_epsilon(current_step):
 ##### Beta Linear Increase Function ####
 def get_beta(current_step):
     fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
-    beta = BETA_START + fraction * (BETA_END - BETA_START)
-    if beta < BETA_END:
-        beta = BETA_END
-    return beta
+    return BETA_START + fraction * (BETA_END - BETA_START)
 
-   
+
 def select_action(state, steps_done):
     global EPSILON
     # This equation is for the decaying epsilon
@@ -157,7 +189,8 @@ def optimize_model(t):
         return 0
 
     (states, actions, rewards, next_states, dones), importance, idxes = memory.sample(BATCH_SIZE)
-    
+
+
     states = np.array(states).reshape(-1, 4, HEIGHT, WIDTH)
     next_states = np.array(next_states).reshape(-1, 4, HEIGHT, WIDTH)
 
@@ -172,25 +205,21 @@ def optimize_model(t):
     max_next_Q[dones] = 0.0
     max_next_Q = max_next_Q.detach()
     expected_Q = rewards + GAMMA * max_next_Q
-    
-    importance_t = torch.FloatTensor(importance ** get_beta(t- LEARNING_STARTS)).to(device)
+
+    #setting the importance values
+    importance_t = torch.FloatTensor(importance ** get_beta(t)).to(device)
 
     # |curr_Q - expected_Q|
     error =  torch.abs(curr_Q - expected_Q)
-    memory.set_priorities(idxes, error)
+
+    # computing errors for the huber loss
+    error_h = torch.where(error < DELTA, 0.5 * error ** 2, DELTA * (error - 0.5 * DELTA))
+   
+    # setting the priorties as this huber loss
+    memory.set_priorities(idxes,error_h)
     
-    # Compute Huber loss for error
-    #if error < DELTA:
-    #    loss = error**2 * 0.5
-    #else:
-    #    loss = DELTA * (error - 0.5)
-
-    # Huber loss
-    #error_d = torch.cmin(error,DELTA)
-    #loss = torch.cmul(error, error:mul(2):add(- error_d)):mul(0.5):mean()
-
-    # Weighing loss by importance values
-    loss = torch.mean( (error**2) * importance_t)
+    # reducing the huber loss with the mean and scaled importance
+    loss = torch.mean(importance_t * error_h)
 
     # Optimize the model
     optimizer.zero_grad()
@@ -205,7 +234,7 @@ def train_model(num_frames):
     env = make_atari(ENV_NAME)
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
     dtm = time.strftime('%Y%m%d_%H%M')
-    train_results = results.results(globals(), f'PRPLY_{ENV_NAME}_{dtm}')
+    train_results = results.results(globals(), f'DDQN_{ENV_NAME}_{dtm}')
 
     cumulative_frames = 0
     best_score = -50
@@ -243,33 +272,33 @@ def train_model(num_frames):
             full_loss.append(np.mean(cum_loss))
         rewards.append(cum_reward)
         games += 1
-        # # Single Game Evaluation for GIF 
-        # if games % 500 == 0:    
-        #     print("Evaluating for gif")    
-        #     terminal = False
-        #     real_frames_for_gif = []
-        #     frames_for_gif = []
-        #     eval_rewards = []
-        #     frame = env.reset()
+        #Single Game Evaluation for GIF 
+        if games % 100 == 0:    
+            print("Evaluating for gif")    
+            terminal = False
+            real_frames_for_gif = []
+            frames_for_gif = []
+            eval_rewards = []
+            frame = env.reset()
 
-        #     #playing one game
-        #     while not terminal:
-        #         episode_reward_sum = 0
-        #         single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
-        #         new_frame, reward, terminal, _ = env.step(single_action)
+            #playing one game
+            while not terminal:
+                episode_reward_sum = 0
+                single_action = select_action(torch.tensor(np.array(frame).reshape(-1, 4, HEIGHT, WIDTH)).to(device), cumulative_frames)
+                new_frame, reward, terminal, _ = env.step(single_action)
 
-        #         real_frame = env.render(mode='rgb_array')                
-        #         real_frames_for_gif.append(real_frame)
-        #         frames_for_gif.append(new_frame)
-        #         frame = new_frame
-        #         episode_reward_sum += reward
-        #         if terminal:
-        #             eval_rewards.append(episode_reward_sum)    
-        #     try:
-        #             generate_gif(cumulative_frames, real_frames_for_gif, eval_rewards[0], PATH)
-        #             generate_gif(cumulative_frames+1, frames_for_gif, eval_rewards[0], PATH)
-        #     except IndexError:
-        #             print("No evaluation game finished")
+                real_frame = env.render(mode='rgb_array')                
+                real_frames_for_gif.append(real_frame)
+                frames_for_gif.append(np.array(new_frame)[None])
+                frame = new_frame
+                episode_reward_sum += reward
+                if terminal:
+                    eval_rewards.append(episode_reward_sum)    
+            try:
+                    generate_gif(cumulative_frames, real_frames_for_gif, eval_rewards[0], PATH)
+                    generate_gif(cumulative_frames+1, frames_for_gif, eval_rewards[0], PATH)
+            except IndexError:
+                    print("No evaluation game finished")
 
         # Printing Game Progress
         if games % 10 == 0:
@@ -312,8 +341,6 @@ def eval_action(state, model):
     else:
         return np.random.randint(0, n_actions)
 
-
-#### Plays a game from a saved modeled ####
 def inference(episodes, model, env_name):
     env = make_atari(env_name)
     env = wrap_deepmind(env, episode_life=True, frame_stack=True)  
@@ -329,6 +356,7 @@ def inference(episodes, model, env_name):
                 observation, reward, done, _ = env.step(action)
                 if reward != 0:
                     print(reward)
+
 
 def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False):
     '''play a single game using greedy policy and populate a data structure with tuples of 
@@ -357,25 +385,20 @@ def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False):
     
     return data
 
-# def generate_gif(current_frame, frames_for_gif, reward, path):     
-#     imageio.mimsave(f'{GIF_PATH}{"ATARI_frame_{0}_reward_{1}.gif".format(current_frame, reward)}',
-#                         frames_for_gif, duration=1/30)
-
+def generate_gif(current_frame, frames_for_gif, reward, path):
+    #takes current, and generates and saves a GIF to PATH for input frames
+    #for i, frame_i in enumerate(frames_for_gif): 
+    #    frame = np.array(frame_i)[None]
+    #    frames_for_gif[i] = resize(frame, (420, 320,3), 
+    #                                 ).astype(np.uint8)      
+    imageio.mimsave(f'{GIF_PATH}{"ATARI_frame_{0}_reward_{1}.gif".format(current_frame, reward)}',
+                        frames_for_gif, duration=1/30)
 
 #################################
 #### Hyperparamters/Variables ####
 #################################
-
-ENV_NAME = 'PongNoFrameskip-v4'
-ENV_TERM_SCORE = 18 # score after which training can terminate
-e = gym.make(ENV_NAME)
-# env = gym.make('BeamRider-v0')
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_actions = e.action_space.n
-
-
-
-PRIO_SCALE = 1
+PRIO_SCALE = 0.6
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
@@ -387,7 +410,6 @@ EXP_FRACTION = 0.1
 NUMBER_OF_FRAMES = 1e7
 
 TARGET_UPDATE = 1000
-# ANNELING_FRAMES = 1000000
 TRAIN_FREQUENCY = 4
 
 HEIGHT = 84
@@ -396,12 +418,13 @@ EPSILON = 0
 MEM_SIZE = 10000
 LEARNING_STARTS = 10000
 SINGLE_EVAL_STEPS = 10_000
+ENV_TERM_SCORE = 21
 
 SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
 LEARNING_RATE = 1e-4
 PATH = "./deepQ.pt"
-# GIF_PATH = './game_video/'
+GIF_PATH = './game_video/'
 
 policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
@@ -410,14 +433,17 @@ optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
 memory = Prio_ReplayBuffer(MEM_SIZE)
 steps_done = 0
 
-
 #################################
 ##### Main Function to Call #####
 #################################
+
 def main():
     train_model(NUMBER_OF_FRAMES)
-    #model = load_agent()
+    # model = load_agent()
     #inference(1, model, ENV_NAME)
+    # env = make_atari(ENV_NAME)
+    # env = wrap_deepmind(env, episode_life=True, frame_stack=True)  
+    # data = play_single_game(model, env)
 
 if __name__ == '__main__':
     main()
