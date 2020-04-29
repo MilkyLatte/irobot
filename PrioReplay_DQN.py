@@ -201,9 +201,10 @@ def optimize_model(t):
     expected_Q = rewards + GAMMA * max_next_Q
 
     importance_t = torch.FloatTensor(importance ** get_beta(t)).to(device) #setting the importance values
-    error = F.smooth_l1_loss(curr_Q,expected_Q, reduction='none') # huber loss error
-    memory.set_priorities(idxes,error) # setting the priorties as this huber loss
-    loss = torch.mean(importance_t * error) # reducing the huber loss with the mean and scaled importance
+    td_error = torch.abs(curr_Q - expected_Q)
+    h_error = F.smooth_l1_loss(curr_Q,expected_Q, reduction='none') # huber loss error
+    memory.set_priorities(idxes,td_error) # setting the priorties as this huber loss
+    loss = torch.mean(importance_t * h_error) # reducing the huber loss with the mean and scaled importance
 
     # Optimize the model
     optimizer.zero_grad()
