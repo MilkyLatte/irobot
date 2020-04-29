@@ -128,22 +128,17 @@ class Prio_ReplayBuffer(object):
         return np.array(obses_t), np.array(actions), np.array(rewards), np.array(obses_tp1), np.array(dones)
 
     def sample(self, batch_size):
-        #idxes = [random.randint(0, len(self._storage) - 1)
-        #         for _ in range(batch_size)]
+        #idxes = [random.randint(0, len(self._storage) - 1) for _ in range(batch_size)]
 
-        #sampling with the priorities
+        #probabilities and importance
         sample_probabilities = self.get_probabilities(PRIO_SCALE)
-
-        idxes = random.choices(len(self._storage), k = batch_size, weights = sample_probabilities)
-        #idxes = np.random.choice(range(len(self._storage)), batch_size,p = sample_probabilities)
-
-        #define the importance to pass through for normalising the learning steps
-        importance = self.get_importance(sample_probabilities[idxes])
-
-        return self._encode_sample(idxes), importance, idxes
+        importance = self.get_importance(sample_probabilities)
+        idxes = random.choices(range(self._maxsize), k = batch_size, weights = sample_probabilities)
+        return self._encode_sample(idxes), importance[idxes] , idxes
 
     def set_priorities(self, indices, errors, offset=1e-6):
         for i,e in zip(indices, errors):
+            assert priority > 0
             self.priorities[i] = e.item() + offset
 
 
@@ -189,8 +184,7 @@ def optimize_model(t):
         return 0
 
     (states, actions, rewards, next_states, dones), importance, idxes = memory.sample(BATCH_SIZE)
-
-
+    
     states = np.array(states).reshape(-1, 4, HEIGHT, WIDTH)
     next_states = np.array(next_states).reshape(-1, 4, HEIGHT, WIDTH)
 
@@ -206,20 +200,10 @@ def optimize_model(t):
     max_next_Q = max_next_Q.detach()
     expected_Q = rewards + GAMMA * max_next_Q
 
-    #setting the importance values
-    importance_t = torch.FloatTensor(importance ** get_beta(t)).to(device)
-
-    # |curr_Q - expected_Q|
-    error =  torch.abs(curr_Q - expected_Q)
-
-    # computing errors for the huber loss
-    error_h = torch.where(error < DELTA, 0.5 * error ** 2, DELTA * (error - 0.5 * DELTA))
-   
-    # setting the priorties as this huber loss
-    memory.set_priorities(idxes,error_h)
-    
-    # reducing the huber loss with the mean and scaled importance
-    loss = torch.mean(importance_t * error_h)
+    importance_t = torch.FloatTensor(importance ** get_beta(t)).to(device) #setting the importance values
+    error = F.smooth_l1_loss(curr_Q,expected_Q, reduction='none') # huber loss error
+    memory.set_priorities(idxes,error) # setting the priorties as this huber loss
+    loss = torch.mean(importance_t * error) # reducing the huber loss with the mean and scaled importance
 
     # Optimize the model
     optimizer.zero_grad()
