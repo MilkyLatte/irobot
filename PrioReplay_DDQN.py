@@ -56,6 +56,8 @@ GAMMA = 0.99
 EPS_START = 1
 EPS_END = 0.01
 EXP_FRACTION = 0.1
+BETA_START = 0.4
+BETA_END = 1
 NUMBER_OF_FRAMES = 1e7
 
 TARGET_UPDATE = 1000
@@ -69,6 +71,7 @@ EPSILON = 0
 MEM_SIZE = 10000
 LEARNING_STARTS = 10000
 SINGLE_EVAL_STEPS = 10_000
+ENV_TERM_SCORE = 21
 
 SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
@@ -183,12 +186,11 @@ class Prio_ReplayBuffer(object):
         #probabilities and importance
         sample_probabilities = self.get_probabilities(PRIO_SCALE)
         importance = self.get_importance(sample_probabilities)
-        idxes = random.choices(range(self._maxsize), k = batch_size, weights = sample_probabilities)
+        idxes = random.choices(range(len(self.priorities)), k = batch_size, weights = sample_probabilities)
         return self._encode_sample(idxes), importance[idxes] , idxes
 
     def set_priorities(self, indices, errors, offset=1e-6):
         for i,e in zip(indices, errors):
-            #assert priority > 0
             self.priorities[i] = e.item() + offset
 
 
@@ -266,9 +268,10 @@ def optimize_model(t):
     expected_Q = rewards + GAMMA * max_next_Q
 
     importance_t = torch.FloatTensor(importance ** get_beta(t)).to(device) #setting the importance values
-    error = F.smooth_l1_loss(curr_Q,expected_Q, reduction='none') # huber loss error
+    error = torch.abs(curr_Q - expected_Q)
+    h_error = F.smooth_l1_loss(curr_Q,expected_Q, reduction='none') # huber loss error
     memory.set_priorities(idxes,error) # setting the priorties as this huber loss
-    loss = torch.mean(importance_t * error) # reducing the huber loss with the mean and scaled importance
+    loss = torch.mean(importance_t * h_error) # reducing the huber loss with the mean and scaled importance
 
     # Optimize the model
     optimizer.zero_grad()
