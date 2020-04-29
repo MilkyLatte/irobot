@@ -76,17 +76,19 @@ PATH = "./deepQ.pt"
 # number of games to play before recording a mini-video and saving model
 NUM_EPS_BETWEEN_SAVES = 100
 NUM_EPS_TO_SAVE = 1         # number of games to record in the mini video
-ALGO_NAME = 'DDQN'          # name of algorithm for log file path etc
+ALGO_NAME = 'PRDDQN'          # name of algorithm for log file path etc
 
 ### Hyper parameter tweaking
 if ENV_NAME.startswith('Breakout'):
-    EPS_END = 0.2  # want more randomness
+    EPS_END = 0.1  # want more randomness
+    EXP_FRACTION = 0.5
     NUM_EPS_TO_SAVE = 10
     NUM_EPS_BETWEEN_SAVES = 500
     BATCH_SIZE = 64
 
 if ENV_NAME.startswith('MsPacman'):
-    EPS_END = 0.2
+    EPS_END = 0.1
+    EXP_FRACTION = 0.5
     NUM_EPS_TO_SAVE = 6
     NUM_EPS_BETWEEN_SAVES = 300
     BATCH_SIZE = 64

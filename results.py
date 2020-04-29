@@ -42,7 +42,7 @@ class results():
             self.records.append((t, games, frames, epsilon, score, network_loss, delta_t, frames_per_sec))
             if len(self.records)%5==0:
                 self.save_results()
-            print(f'record count {len(self.records)} frames/sec {frames_per_sec}')
+            print(f'episodes {len(self.records)} frames/sec {frames_per_sec} last score {score}')
         except Exception as err:
             print(f'Error recording results {err}')
 

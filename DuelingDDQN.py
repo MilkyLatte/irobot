@@ -72,6 +72,26 @@ LEARNING_RATE = 1e-4
 PATH = "./deepQ.pt"
 GIF_PATH = './game_video/'
 
+NUM_EPS_BETWEEN_SAVES = 100
+NUM_EPS_TO_SAVE = 1         # number of games to record in the mini video
+ALGO_NAME = 'DUEL'          # name of algorithm for log file path etc
+
+### Hyper parameter tweaking
+if ENV_NAME.startswith('Breakout'):
+    EPS_END = 0.1  # want more randomness
+    EXP_FRACTION = 0.3
+    NUM_EPS_TO_SAVE = 10
+    NUM_EPS_BETWEEN_SAVES = 500
+    BATCH_SIZE = 64
+
+if ENV_NAME.startswith('MsPacman'):
+    EPS_END = 0.1
+    EXP_FRACTION = 0.3
+    NUM_EPS_TO_SAVE = 6
+    NUM_EPS_BETWEEN_SAVES = 300
+    BATCH_SIZE = 64
+
+
 # Tracking memory usage
 pid = os.getpid()
 py = psutil.Process(pid)
@@ -266,7 +286,7 @@ def train_model(num_frames):
     env = make_atari(ENV_NAME)
     env = wrap_deepmind(env, episode_life=True, frame_stack=True)
     dtm = time.strftime('%Y%m%d_%H%M')
-    train_results = results.results(globals(), f'DUEL_{ENV_NAME}_{dtm}')
+    train_results = results.results(globals(), f'{ALGO_NAME}_{ENV_NAME}_{dtm}')
 
     cumulative_frames = 0
     best_score = -50
@@ -342,6 +362,7 @@ def train_model(num_frames):
         # Printing Game Progress
         if games < 10 or games % 10 == 0:
             print("=============================================")
+            print(f'Env: {ENV_NAME} Algo: {ALGO_NAME}')
             print("Game: {} | Frame {}".format(games, cumulative_frames))
             print("Final reward: {}".format(cum_reward))
             print("Epsilon after: {}".format(EPSILON))
@@ -354,13 +375,20 @@ def train_model(num_frames):
             print('iteration {}: memory use: {}MB'.format(
                 cumulative_frames, memoryUse))
 
-        train_results.record(cumulative_frames, games, EPSILON, cum_reward, full_loss[-1])
-        if games==1 or games%100==0:
+        train_results.record(cumulative_frames, games,
+                             EPSILON, cum_reward, full_loss[-1])
+        if games == 1 or games % NUM_EPS_BETWEEN_SAVES == 0:
             train_results.save_model(games, policy_net)
-            data = play_single_game(policy_net, env)
+            data = play_single_game(
+                policy_net, env, display=False, num_episodes=NUM_EPS_TO_SAVE)
             train_results.save_single_game(games, data)
-        
-        if cumulative_frames >= NUMBER_OF_FRAMES:
+
+        # termination criteria
+        if np.mean(rewards[-100:]) >= ENV_TERM_SCORE and cumulative_frames > LEARNING_STARTS:
+            train_results.save_model(games, policy_net)
+            train_results.save_single_game(games, play_single_game(
+                policy_net, env, num_episodes=NUM_EPS_TO_SAVE))
+            print("training finished!")
             break
 
     # torch.save(target_net.state_dict(), PATH)
