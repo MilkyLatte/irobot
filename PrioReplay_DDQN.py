@@ -193,7 +193,7 @@ policy_net = DeepQNet(HEIGHT, WIDTH).to(device)
 target_net = DeepQNet(HEIGHT, WIDTH).to(device)
 
 optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
-memory = ReplayBuffer(MEM_SIZE)
+memory = Prio_ReplayBuffer(MEM_SIZE)
 steps_done = 0
 
 
@@ -208,6 +208,11 @@ def get_epsilon(current_step):
     # if eps_threshold < EPS_END:
     #     return EPS_END
     # return eps_threshold
+
+##### Beta Linear Increase Function ####
+def get_beta(current_step):
+    fraction = min(float(current_step) / SCHEDULE_TIMESTEPS , 1.0)
+    return BETA_START + fraction * (BETA_END - BETA_START)
 
 
 def select_action(state, steps_done):
