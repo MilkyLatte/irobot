@@ -157,7 +157,6 @@ class Prio_ReplayBuffer(object):
 
     def set_priorities(self, indices, errors, offset=1e-6):
         for i,e in zip(indices, errors):
-            assert priority > 0
             self.priorities[i] = e.item() + offset
 
 
