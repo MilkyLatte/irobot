@@ -17,8 +17,12 @@ from skimage.transform import resize
 
 from wrappers import wrap_deepmind, make_atari
 
-ENV_NAME = 'PongNoFrameskip-v4'
-
+#ENV_NAME = 'PongNoFrameskip-v4'
+#ENV_TERM_SCORE = 18
+# ENV_NAME = 'BreakoutNoFrameskip-v4'
+# ENV_TERM_SCORE = 300
+ENV_NAME = 'MsPacmanNoFrameskip-v4'
+ENV_TERM_SCORE = 1e8
 e = gym.make(ENV_NAME)
 # env = gym.make('BeamRider-v0')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,9 +72,23 @@ SCHEDULE_TIMESTEPS = EXP_FRACTION * NUMBER_OF_FRAMES
 
 LEARNING_RATE = 1e-4
 PATH = "./deepQ.pt"
-GIF_PATH = './game_video/'
+#GIF_PATH = './game_video/'
+NUM_EPS_BETWEEN_SAVES = 100 # number of games to play before recording a mini-video and saving model
+NUM_EPS_TO_SAVE = 1         # number of games to record in the mini video
+ALGO_NAME = 'DDQN'          # name of algorithm for log file path etc
 
+### Hyper parameter tweaking
+if ENV_NAME.startswith('Breakout'):
+    EPS_END = 0.2 # want more randomness
+    NUM_EPS_TO_SAVE = 10
+    NUM_EPS_BETWEEN_SAVES = 500
+    BATCH_SIZE = 64
 
+if ENV_NAME.startswith('MsPacman'):
+    EPS_END = 0.2
+    NUM_EPS_TO_SAVE = 6
+    NUM_EPS_BETWEEN_SAVES = 300
+    BATCH_SIZE = 64
 
 class DeepQNet(nn.Module):
     def __init__(self, h, w):
@@ -90,6 +108,7 @@ class DeepQNet(nn.Module):
         linear_input = convh * convw * 64
         self.fc1 = nn.Linear(linear_input, 512)
         self.out = nn.Linear(512, n_actions)
+    
     def forward(self, x):
         x = F.relu(self.conv1(x.float()))
         x = F.relu(self.conv2(x))
@@ -243,7 +262,7 @@ def train_model(num_frames):
     env = make_atari(ENV_NAME)
     env = wrap_deepmind(env,episode_life=True, frame_stack=True)
     dtm = time.strftime('%Y%m%d_%H%M')
-    train_results = results.results(globals(), f'DDQN_{ENV_NAME}_{dtm}')
+    train_results = results.results(globals(), f'{ALGO_NAME}_{ENV_NAME}_{dtm}')
 
     cumulative_frames = 0
     best_score = -50
@@ -310,8 +329,9 @@ def train_model(num_frames):
         #             print("No evaluation game finished")
 
         # Printing Game Progress
-        if games % 10 == 0:
+        if games%10 == 0:
             print("=============================================")
+            print(f'Env: {ENV_NAME} Algo: {ALGO_NAME}')
             print("Game: {} | Frame {}".format(games, cumulative_frames))
             print("Final reward: {}".format(cum_reward))
             print("Epsilon after: {}".format(EPSILON))
@@ -322,16 +342,19 @@ def train_model(num_frames):
                 np.mean(rewards[-100:])))
 
         train_results.record(cumulative_frames, games, EPSILON, cum_reward, full_loss[-1])
-        if games==1 or games%100==0:
+        if games==1 or games%NUM_EPS_BETWEEN_SAVES==0:
             train_results.save_model(games, policy_net)
-            data = play_single_game(policy_net, env)
+            data = play_single_game(policy_net, env, display=False, num_episodes=NUM_EPS_TO_SAVE)
             train_results.save_single_game(games, data)
         
         # termination criteria
         if np.mean(rewards[-100:]) >= ENV_TERM_SCORE and cumulative_frames > LEARNING_STARTS:
+            train_results.save_model(games, policy_net)
+            train_results.save_single_game(games, play_single_game(policy_net, env, num_episodes=NUM_EPS_TO_SAVE))
+            print("training finished!")
             break
 
-    # torch.save(target_net.state_dict(), PATH)
+    # torch.save(target_net.state_dict(), PATH) # note that model will be saved once training is complete above
     train_results.close()
 
 
@@ -367,41 +390,44 @@ def inference(episodes, model, env_name):
                     print(reward)
 
 
-def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False):
-    '''play a single game using greedy policy and populate a data structure with tuples of 
+def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False, num_episodes=1):
+    '''play some games using greedy policy and populate a data structure with tuples of 
     (frame_idx, max_q, action, reward, rgb_frame)'''
-    state = env.reset()
-    done = False
+    
     frames = []
     data = []
     frame_idx=0
-    reward = 0
-    max_q = 0
-    action = 0
+    
+    for i in range(num_episodes):
+        state = env.reset()
+        terminal = False
+        reward = 0
+        max_q = 0
+        action = 0
 
-    while not done:
-        if (display):
-            env.render()
-        frame = env.render(mode='rgb_array')
-        state = torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
-        with torch.no_grad():
-            q_vals = q_network(state)
-            action = q_vals.max(1)[1].item()
-            max_q_val = q_vals.max(1)[0].item()
-            data.append((frame_idx, max_q_val, action, reward, frame))
-            state, reward, done, _ = env.step(action)
-        frame_idx +=1
+        while not terminal:
+            if (display):
+                env.render()
+            frame = env.render(mode='rgb_array')
+            state = torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
+            with torch.no_grad():
+                q_vals = q_network(state)
+                action = q_vals.max(1)[1].item()
+                max_q_val = q_vals.max(1)[0].item()
+                data.append((frame_idx, max_q_val, action, reward, frame))
+                state, reward, terminal, _ = env.step(action)
+            frame_idx +=1
     
     return data
 
-def generate_gif(current_frame, frames_for_gif, reward, path):
-    #takes current, and generates and saves a GIF to PATH for input frames
-    #for i, frame_i in enumerate(frames_for_gif): 
-    #    frame = np.array(frame_i)[None]
-    #    frames_for_gif[i] = resize(frame, (420, 320,3), 
-    #                                 ).astype(np.uint8)      
-    imageio.mimsave(f'{GIF_PATH}{"ATARI_frame_{0}_reward_{1}.gif".format(current_frame, reward)}',
-                        frames_for_gif, duration=1/30)
+# def generate_gif(current_frame, frames_for_gif, reward, path):
+#     #takes current, and generates and saves a GIF to PATH for input frames
+#     #for i, frame_i in enumerate(frames_for_gif): 
+#     #    frame = np.array(frame_i)[None]
+#     #    frames_for_gif[i] = resize(frame, (420, 320,3), 
+#     #                                 ).astype(np.uint8)      
+#     imageio.mimsave(f'{GIF_PATH}{"ATARI_frame_{0}_reward_{1}.gif".format(current_frame, reward)}',
+#                         frames_for_gif, duration=1/30)
 
 def main():
     train_model(NUMBER_OF_FRAMES)
