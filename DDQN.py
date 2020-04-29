@@ -81,16 +81,18 @@ ALGO_NAME = 'DDQN'          # name of algorithm for log file path etc
 ### Hyper parameter tweaking
 if ENV_NAME.startswith('Breakout'):
     EPS_END = 0.1  # want more randomness
-    EXP_FRACTION = 0.3
+    EXP_FRACTION = 0.2
     NUM_EPS_TO_SAVE = 10
     NUM_EPS_BETWEEN_SAVES = 500
+    MEM_SIZE = 200_000
     BATCH_SIZE = 64
 
 if ENV_NAME.startswith('MsPacman'):
     EPS_END = 0.1
-    EXP_FRACTION = 0.3
+    EXP_FRACTION = 0.2
     NUM_EPS_TO_SAVE = 6
     NUM_EPS_BETWEEN_SAVES = 300
+    MEM_SIZE = 300_000
     BATCH_SIZE = 64
 
 

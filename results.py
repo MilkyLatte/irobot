@@ -40,9 +40,9 @@ class results():
             with open(self.log_file_name, mode='a') as f:
                 f.write(t.strftime('%H:%M:%S') + f',{games},{frames},{epsilon},{score},{network_loss},{delta_t},{frames_per_sec}\n')
             self.records.append((t, games, frames, epsilon, score, network_loss, delta_t, frames_per_sec))
-            if len(self.records)%5==0:
+            if len(self.records)%10==0:
                 self.save_results()
-            print(f'episodes {len(self.records)} frames/sec {frames_per_sec} last score {score}')
+                print(f'episodes {len(self.records)} frames/sec {frames_per_sec} last score {score}')
         except Exception as err:
             print(f'Error recording results {err}')
 
