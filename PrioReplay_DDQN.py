@@ -49,6 +49,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # }
 
 n_actions = e.action_space.n
+PRIO_SCALE = 0.6
+
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1
@@ -186,7 +188,7 @@ class Prio_ReplayBuffer(object):
 
     def set_priorities(self, indices, errors, offset=1e-6):
         for i,e in zip(indices, errors):
-            assert priority > 0
+            #assert priority > 0
             self.priorities[i] = e.item() + offset
 
 
