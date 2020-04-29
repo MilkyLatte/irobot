@@ -441,30 +441,33 @@ def inference(episodes, model, env_name):
                 if reward != 0:
                     print(reward)
 
-def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False):
-    '''play a single game using greedy policy and populate a data structure with tuples of 
+def play_single_game(q_network : torch.nn.Module, env : gym.Env, display=False, num_episodes=1):
+    '''play some games using greedy policy and populate a data structure with tuples of 
     (frame_idx, max_q, action, reward, rgb_frame)'''
-    state = env.reset()
-    done = False
+    
     frames = []
     data = []
     frame_idx=0
-    reward = 0
-    max_q = 0
-    action = 0
+    
+    for i in range(num_episodes):
+        state = env.reset()
+        terminal = False
+        reward = 0
+        max_q = 0
+        action = 0
 
-    while not done:
-        if (display):
-            env.render()
-        frame = env.render(mode='rgb_array')
-        state = torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
-        with torch.no_grad():
-            q_vals = q_network(state)
-            action = q_vals.max(1)[1].item()
-            max_q_val = q_vals.max(1)[0].item()
-            data.append((frame_idx, max_q_val, action, reward, frame))
-            state, reward, done, _ = env.step(action)
-        frame_idx +=1
+        while not terminal:
+            if (display):
+                env.render()
+            frame = env.render(mode='rgb_array')
+            state = torch.tensor(np.array(state).reshape(-1, 4, HEIGHT, WIDTH)).to(device)
+            with torch.no_grad():
+                q_vals = q_network(state)
+                action = q_vals.max(1)[1].item()
+                max_q_val = q_vals.max(1)[0].item()
+                data.append((frame_idx, max_q_val, action, reward, frame))
+                state, reward, terminal, _ = env.step(action)
+            frame_idx +=1
     
     return data
 
